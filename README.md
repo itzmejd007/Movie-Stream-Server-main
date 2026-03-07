@@ -59,36 +59,12 @@ pip install -r requirements.txt
 
 ---
 
-# 🔥 4. Test FastAPI (Development Mode)
+# 🏗 5. Run/Stop FastAPI in Production
+
+To Run:
 
 ```bash
-uvicorn Backend.fastapi.main:app --host 0.0.0.0 --port 8000
-```
-
-Test:
-
-```
-http://SERVER_IP:8000
-```
-
-If working → continue.
-
-Stop it (CTRL+C).
-
----
-
-# 🏗 5. Run FastAPI in Production
-
-Install Gunicorn (recommended):
-
-```bash
-pip install gunicorn
-```
-
-Run:
-
-```bash
-gunicorn -w 2 -k uvicorn.workers.UvicornWorker Backend.fastapi.main:app --bind 0.0.0.0:8000
+nohup python -m Backend
 
 ```
 
@@ -96,43 +72,6 @@ To Stop:
 
 ```bash
 sudo pkill -f python
-```
-
----
-
-# ⚙ 6. Create Systemd Service (Auto Restart)
-
-Create service file:
-
-```bash
-sudo nano /etc/systemd/system/fastapi.service
-```
-
-Paste:
-
-```
-[Unit]
-Description=FastAPI App
-After=network.target
-
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/yourrepo
-ExecStart=/home/ubuntu/yourrepo/venv/bin/gunicorn -w 2 -k uvicorn.workers.UvicornWorker Backend.fastapi.main:app --bind 0.0.0.0:8000
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Save.
-
-Enable service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable fastapi
-sudo systemctl start fastapi
 ```
 
 ---
