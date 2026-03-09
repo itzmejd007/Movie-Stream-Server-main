@@ -225,7 +225,7 @@ class Database:
                 rip=metadata_info['rip'],
                 telegram=[
                     QualityDetail(
-                        quality=metadata_info['quality'],
+                        quality=metadata_info.get('quality') or 'Unknown',
                         id=encoded_string,
                         name=name,
                         size=size
@@ -258,7 +258,7 @@ class Database:
                                 episode_backdrop=metadata_info['episode_backdrop'],
                                 telegram=[
                                     QualityDetail(
-                                        quality=metadata_info['quality'],
+                                        quality=metadata_info.get('quality') or 'Unknown',
                                         id=encoded_string,
                                         name=name,
                                         size=size

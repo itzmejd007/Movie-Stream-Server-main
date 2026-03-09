@@ -265,8 +265,7 @@ async def file_receive_handler(bot: Client, message: Message):
                 size = get_readable_file_size(file.file_size)
                 channel = str(message.chat.id).replace("-100","")
                 
-
-                metadata_info = await metadata(clean_filename(title), file)
+                metadata_info = await metadata(clean_filename(title), message)
                 if metadata_info is None:
                     return
 

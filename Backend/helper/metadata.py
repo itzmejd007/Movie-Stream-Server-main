@@ -8,7 +8,7 @@ from Backend.helper.pyro import extract_tmdb_id, normalize_languages
 
 tmdb = aioTMDb(key=Telegram.TMDB_API, language="en-US", region="US")
 
-async def metadata(filename, media):
+async def metadata(filename, message):
 
     # Parse the filename using PTN
     data = PTN.parse(filename)
@@ -21,7 +21,9 @@ async def metadata(filename, media):
     year = data.get('year')
     quality = data.get('resolution')
     if quality is None:
-        quality = await get_media_quality(media)
+        quality = await get_media_quality(message)
+    if quality is None:
+        quality = "Unknown"
 
     languages = normalize_languages(data.get('language'))
     rip = data.get('quality')
@@ -145,7 +147,7 @@ async def metadata(filename, media):
                 "episode_number": episode,
                 "episode_title": episode_title,
                 "episode_backdrop": episode_backdrop,
-                "quality": quality,
+                "quality": quality or "Unknown",
                 "languages": languages or ['hi'],
                 "rip": rip or 'Blu-ray'
                 }
@@ -207,7 +209,7 @@ async def fetch_movie_metadata(title, year=None, quality=None, default_id=None, 
                 "media_type": media_type,
                 "genres": genres,
                 "runtime": runtime or 0,
-                "quality": quality,
+                "quality": quality or "Unknown",
                 "languages": languages or ['hi'],
                 "rip": rip or 'Blu-ray'
             }

@@ -9,15 +9,18 @@ from Backend.logger import LOGGER
 
 
 
-async def get_media_quality(media=None):
+async def get_media_quality(message=None):
     des_path = None
     try:
+        if not message:
+            return None
+        media = message.video or message.document
         path = "Mediainfo/"
         if not await aiopath.isdir(path):
             await mkdir(path)
         des_path = ospath.join(path, media.file_name)
 
-        async for chunk in StreamBot.stream_media(media.file_id, limit=1):
+        async for chunk in StreamBot.stream_media(message, limit=1):
 
             async with aiopen(des_path, "ab") as f:
                 await f.write(chunk)
