@@ -275,19 +275,38 @@ class Database:
         self, 
         sort_params: List[Tuple[str, str]], 
         page: int, 
-        page_size: int
+        page_size: int,
+        genre: Optional[str] = None,
+        year: Optional[str] = None,
+        audio: Optional[str] = None
     ) -> dict:
         skip = (page - 1) * page_size
         sort_criteria = [(field, ASCENDING if direction == "asc" else DESCENDING) 
                         for field, direction in sort_params]
         
-        pipeline = [
+        match_stage = {}
+        if genre and genre.strip().lower() != "all":
+            # Match if the genre array contains a case-insensitive version of the requested genre
+            match_stage["genres"] = {"$regex": f"^{genre}$", "$options": "i"}
+        if year and year.strip().lower() != "all":
+            try:
+                match_stage["release_year"] = int(year)
+            except ValueError:
+                pass
+        if audio and audio.strip().lower() != "all":
+            match_stage["languages"] = {"$regex": f"^{audio}$", "$options": "i"}
+        
+        pipeline = []
+        if match_stage:
+            pipeline.append({"$match": match_stage})
+
+        pipeline.extend([
             {"$sort": dict(sort_criteria)},
             {"$facet": {
                 "metadata": [{"$count": "total_count"}],
                 "data": [{"$skip": skip}, {"$limit": page_size}]
             }}
-        ]
+        ])
         
         result = await self.tv_collection.aggregate(pipeline).to_list(1)
         total_count = result[0]["metadata"][0]["total_count"] if result[0]["metadata"] else 0
@@ -298,24 +317,72 @@ class Database:
         self, 
         sort_params: List[Tuple[str, str]], 
         page: int, 
-        page_size: int
+        page_size: int,
+        genre: Optional[str] = None,
+        year: Optional[str] = None,
+        audio: Optional[str] = None
     ) -> dict:
         skip = (page - 1) * page_size
         sort_criteria = [(field, ASCENDING if direction == "asc" else DESCENDING) 
                         for field, direction in sort_params]
         
-        pipeline = [
+        match_stage = {}
+        if genre and genre.strip().lower() != "all":
+            match_stage["genres"] = {"$regex": f"^{genre}$", "$options": "i"}
+        if year and year.strip().lower() != "all":
+            try:
+                match_stage["release_year"] = int(year)
+            except ValueError:
+                pass
+        if audio and audio.strip().lower() != "all":
+            match_stage["languages"] = {"$regex": f"^{audio}$", "$options": "i"}
+
+        pipeline = []
+        if match_stage:
+            pipeline.append({"$match": match_stage})
+
+        pipeline.extend([
             {"$sort": dict(sort_criteria)},
             {"$facet": {
                 "metadata": [{"$count": "total_count"}],
                 "data": [{"$skip": skip}, {"$limit": page_size}]
             }}
-        ]
+        ])
         
         result = await self.movie_collection.aggregate(pipeline).to_list(1)
         total_count = result[0]["metadata"][0]["total_count"] if result[0]["metadata"] else 0
         sorted_movies = [MovieSchema(**doc) for doc in result[0]["data"]]
         return {"total_count": total_count, "movies": sorted_movies}
+
+    async def get_trending_media(
+        self,
+        page: int = 1,
+        page_size: int = 10
+    ) -> dict:
+        """
+        Fetches the latest mixed media (Movies + TV Shows) sorted by updated_on descending.
+        """
+        skip = (page - 1) * page_size
+        
+        # Pipeline to get the latest from both collections
+        pipeline = [
+            {"$sort": {"updated_on": DESCENDING}},
+            {"$limit": skip + page_size}
+        ]
+
+        movie_results = await self.movie_collection.aggregate(pipeline).to_list(None)
+        tv_results = await self.tv_collection.aggregate(pipeline).to_list(None)
+
+        # Merge, sort by updated_on, and paginate
+        combined = movie_results + tv_results
+        combined.sort(key=lambda x: x.get("updated_on", datetime.min), reverse=True)
+        
+        paginated_results = combined[skip:skip+page_size]
+
+        return {
+            "total_count": len(combined),
+            "results": [self._convert_object_id(doc) for doc in paginated_results]
+        }
 
     async def find_similar_media(
         self,

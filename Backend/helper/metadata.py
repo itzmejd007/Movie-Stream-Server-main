@@ -1,6 +1,6 @@
 from Backend.config import Telegram
 from Backend.helper.imdb import get_detail, get_season, search_title
-from Backend.helper.mediainfo import get_media_quality
+from Backend.helper.mediainfo import get_media_quality, get_media_languages
 import PTN
 from themoviedb import aioTMDb
 
@@ -26,6 +26,8 @@ async def metadata(filename, message):
         quality = "Unknown"
 
     languages = normalize_languages(data.get('language'))
+    if not languages:
+        languages = await get_media_languages(message)
     rip = data.get('quality')
 
     print("Current USE_DEFAULT_ID:", Telegram.USE_DEFAULT_ID)
