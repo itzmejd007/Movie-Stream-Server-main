@@ -1,6 +1,6 @@
 import pycountry
 from pyrogram.file_id import FileId
-from typing import Optional
+from typing import Optional, Union, List
 from Backend.logger import LOGGER
 from Backend import __version__, now, timezone
 from Backend.config import Telegram
@@ -47,14 +47,28 @@ def get_readable_file_size(size_in_bytes):
 
 def clean_filename(filename):
     # Pattern to match any @value with optional surrounding symbols and spaces
-    pattern = r'_@[A-Za-z]+_|@[A-Za-z]+_|[\[\]\s@]*@[^.\s\[\]]+[\]\[\s@]*'
+    pattern = r'_@[A-Za-z0-9]+_|@[A-Za-z0-9]+_|[\[\]\s@]*@[^.\s\[\]]+[\]\[\s@]*'
     
     # Substitute the matched pattern with an empty string
     cleaned_filename = re.sub(pattern, '', filename)
-    cleaned_filename = re.sub(r'(?<=\W)(org|AMZN|DDP|DD|NF|AAC|TVDL|5\.1|2\.1|2\.0|7\.0|7\.1|5\.0|~|\b\w+kbps\b)(?=\W)', '', cleaned_filename, flags=re.IGNORECASE)
-    # Remove any extra spaces or dots that might result from the substitution
-    cleaned_filename = re.sub(r'\s+', ' ', cleaned_filename).strip().replace(' .', '.')
+    # Remove technical tags - much more aggressive
+    tech_tags = r'org|AMZN|DDP|DD|NF|AAC|TVDL|5\.1|2\.1|2\.0|7\.0|7\.1|5\.0|~|\b\w+kbps\b|\bx264\b|\bx265\b|\b10bit\b|\bHEVC\b|\bHDRip\b|\bWebRip\b|\bWEB-DL\b|\bBlu-ray\b|\bTamil\b|\bTelugu\b|\bHindi\b|\bKannada\b|\bMalayalam\b|\bDual Audio\b|\bMulti Audio\b|\bHQ\b|\bESub\b|\bMSub\b|\b\d+MB\b|\b\d+GB\b|\bHEVC\b|\b10-bit\b'
+    cleaned_filename = re.sub(rf'(?i)(?<=\W)({tech_tags})(?=\W)', '', cleaned_filename)
     
+    # Remove emojis
+    cleaned_filename = cleaned_filename.encode('ascii', 'ignore').decode('ascii')
+
+    # Remove anything after common indicators of channel promotions
+    promotional_indicators = [r'Download\s*:', r'Join\s*:', r'Uploaded\s*by', r'https?://', r't\.me']
+    for indicator in promotional_indicators:
+        cleaned_filename = re.split(indicator, cleaned_filename, flags=re.IGNORECASE)[0]
+
+    # Remove non-filesystem-friendly characters
+    cleaned_filename = re.sub(r'[^\w\s\.\-\(\)\[\]]', ' ', cleaned_filename)
+    
+    # Final cleanup of multiple spaces, dots and dashes
+    cleaned_filename = re.sub(r'[\s\._\-]{2,}', ' ', cleaned_filename)
+    cleaned_filename = re.sub(r'\s+', ' ', cleaned_filename).strip()
     return cleaned_filename
 
 
@@ -98,17 +112,33 @@ def extract_tmdb_id(url):
     return None
 
 def remove_urls(text):
-    # Updated regular expression pattern to match URLs
-    url_pattern = r'\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*'
-    text_without_urls = re.sub(url_pattern, '', text)
-    cleaned_text = re.sub(r'\s+', ' ', text_without_urls).strip()
+    # Handle everything from normal text to encoded newlines
+    text = text.replace('\\n', '\n').replace('%5Cn', '\n')
+    
+    # Remove lines containing common bot/channel promotion emojis or text
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        line = line.strip()
+        # skip if line contains links, bots, or promo indicators
+        if re.search(r'https?://|t\.me/|@', line, re.I):
+            continue
+        # ignore lines that look like emojis or symbols only
+        if len(re.sub(r'[^\w]', '', line)) <= 2:
+            continue
+        cleaned_lines.append(line)
+    
+    cleaned_text = ' '.join(cleaned_lines)
+    # Strip emojis
+    cleaned_text = cleaned_text.encode('ascii', 'ignore').decode('ascii')
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
     return cleaned_text
 
 
 
-def normalize_languages(language):
+def normalize_languages(language: Union[str, List[str]]) -> List[str]:
     """
-    Normalize the language input(s) to a list of ISO 639-1 codes using pycountry.
+    Normalize the language input(s) to a list of ISO 639-1 codes using pycountry and common mappings.
     """
     if not language:
         return []
@@ -116,16 +146,63 @@ def normalize_languages(language):
     if isinstance(language, str):
         language = [language]
 
+    # Pre-defined common mapping for Indian languages and variations
+    common_map = {
+        "tamil": "ta", "tam": "ta", "தமிழ்": "ta",
+        "telugu": "te", "tel": "te", "తెలుగు": "te",
+        "hindi": "hi", "hin": "hi", "हिन्दी": "hi",
+        "malayalam": "ml", "mal": "ml", "മലയാളം": "ml",
+        "kannada": "kn", "kan": "kn", "ಕನ್ನಡ": "kn",
+        "english": "en", "eng": "en", "en-us": "en", "en-gb": "en",
+        "bengali": "bn", "ben": "bn", "বাংলা": "bn",
+        "marathi": "mr", "mar": "mr", "मराठी": "mr",
+        "gujarati": "gu", "guj": "gu", "ગુજરાતી": "gu",
+        "punjabi": "pa", "pun": "pa", "ਪੰਜਾਬੀ": "pa",
+        "french": "fr", "fra": "fr", "fre": "fr",
+        "spanish": "es", "spa": "es",
+        "dual": "hi", # Common convention in some trackers for Hindi + English
+        "multi": "hi",
+        "jap": "ja", "japanese": "ja",
+        "kor": "ko", "korean": "ko"
+    }
+
     normalized_languages = []
     for lang in language:
+        if not lang: continue
+        lang_clean = lang.strip().lower()
+        
+        # Check common map first
+        if lang_clean in common_map:
+            normalized_languages.append(common_map[lang_clean])
+            continue
+            
         try:
-            lang_code = pycountry.languages.get(name=lang).alpha_2
-            if lang_code:
-                normalized_languages.append(lang_code)
-        except AttributeError:
-            print(f"Language '{lang}' not found or does not have an ISO 639-1 code.")
+            # Try exact alpha codes first for speed
+            if len(lang_clean) == 2:
+                match = pycountry.languages.get(alpha_2=lang_clean)
+            elif len(lang_clean) == 3:
+                match = pycountry.languages.get(alpha_3=lang_clean)
+            else:
+                # Try by name (case-insensitive search in pycountry can be tricky, so we check name)
+                # pycountry's .get(name=...) is exact. We can iterate for fuzzy match if needed.
+                match = None
+                for l in pycountry.languages:
+                    if hasattr(l, 'name') and l.name.lower() == lang_clean:
+                        match = l
+                        break
+            
+            if match:
+                if hasattr(match, 'alpha_2'):
+                    normalized_languages.append(match.alpha_2)
+                elif hasattr(match, 'alpha_3'):
+                    normalized_languages.append(match.alpha_3[:2])
+            else:
+                # Last resort: just keep first 2 letters if it looks like a code, but better to skip if unsure
+                pass
+        except Exception:
+            pass
 
-    return normalized_languages
+    return list(sorted(set(normalized_languages)))
 
 
 async def cmd_exec(cmd, shell=False):

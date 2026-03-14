@@ -2,6 +2,8 @@ from time import time
 from typing import Any, Dict, List, Optional, Union
 from Backend.helper.encrypt import decode_string
 from fastapi import FastAPI, Query, Request, HTTPException
+from pydantic import ValidationError
+
 from fastapi.responses import StreamingResponse, HTMLResponse
 import urllib.parse
 from urllib.parse import quote
@@ -17,9 +19,12 @@ from Backend.pyrofork import StreamBot, work_loads, multi_clients
 from Backend.helper.exceptions import InvalidHash
 from Backend.helper.custom_dl import ByteStreamer
 from fastapi.middleware.cors import CORSMiddleware
-from Backend.helper.pyro import get_readable_time
-from Backend.helper.modal import SettingsSchema
+from Backend.helper.pyro import get_readable_time, normalize_languages
+from Backend.helper.modal import SettingsSchema, MovieSchema, TVShowSchema
 from Backend import StartTime, __version__, db
+from Backend.helper.metadata import search_tmdb, search_imdb, get_external_details, fetch_movie_metadata, metadata as get_media_metadata
+import PTN
+from bson import ObjectId
 
 
 app = FastAPI()
@@ -38,6 +43,10 @@ app.add_middleware(
 
 
 
+
+@app.get("/api/ping")
+async def ping():
+    return {"ping": "pong", "version": __version__, "db": str(db.db_name)}
 
 @app.get("/", response_model=Dict[str, Any])
 async def get_bot_workloads():
@@ -118,6 +127,17 @@ async def get_sorted_tv_shows(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.get("/api/tvs", response_model=dict)
+async def get_sorted_tvs(
+    sort_by: List[str] = Query(default=["rating:desc"]),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1),
+    genre: Optional[str] = Query(default=None),
+    year: Optional[str] = Query(default=None),
+    audio: Optional[str] = Query(default=None)
+):
+    return await get_sorted_tv_shows(sort_by, page, page_size, genre, year, audio)
+
 @app.get("/api/movies", response_model=dict)
 async def get_sorted_movies(
     sort_by: List[str] = Query(default=["rating:desc"], description="List of fields to sort by. Format: field:direction"),
@@ -164,6 +184,48 @@ async def update_site_settings(settings: SettingsSchema):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.get("/api/admin/analytics")
+async def admin_analytics():
+    try:
+        return await db.get_analytics()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/manual/sync")
+async def admin_sync_manual_files():
+    """Verify manual files exist on Telegram and remove deleted ones."""
+    files = await db.manual_collection.find({"is_linked": {"$ne": True}}).to_list(None)
+    
+    deleted_count = 0
+    # Group by chat_id for efficiency
+    chat_groups = {}
+    for f in files:
+        cid = f["chat_id"]
+        if cid not in chat_groups: chat_groups[cid] = []
+        chat_groups[cid].append(f)
+
+    for cid, g_files in chat_groups.items():
+        # Telegram chat_id usually starts with -100 for channels
+        actual_chat_id = int(f"-100{cid}")
+        msg_ids = [f["msg_id"] for f in g_files]
+        
+        # Batch get messages
+        for i in range(0, len(msg_ids), 200):
+            batch_ids = msg_ids[i:i+200]
+            try:
+                tg_msgs = await StreamBot.get_messages(actual_chat_id, batch_ids)
+                if not isinstance(tg_msgs, list): tg_msgs = [tg_msgs]
+                
+                for idx, msg in enumerate(tg_msgs):
+                    if i+idx >= len(g_files): break
+                    if msg.empty or not (msg.video or msg.document):
+                        await db.delete_manual_file(str(g_files[i+idx]["_id"]))
+                        deleted_count += 1
+            except Exception as e:
+                LOGGER.error(f"Sync error for chat {cid}: {e}")
+
+    return {"message": f"Sync complete. Removed {deleted_count} stale files."}
+
 #Homepage:------
 # hero = http://localhost:8000/api/tvshows?sort_by=rating:desc&sort_by=release_year:desc&page=1&page_size=10
 # latest movies = http://localhost:8000/api/movies?sort_by=updated_on:desc&page=1&page_size=20
@@ -179,18 +241,17 @@ async def update_site_settings(settings: SettingsSchema):
 
 @app.get("/api/id/{tmdb_id}", response_model=dict)
 async def get_media_details(
-    tmdb_id: int, 
+    tmdb_id: str, 
     season_number: Optional[int] = Query(None), 
-    episode_number: Optional[int] = Query(None)
+    episode_number: Optional[int] = Query(None),
+    title: Optional[str] = Query(None)
 ) -> Union[dict, None]:
-    """
-    FastAPI endpoint to get details of a document, specific season, or episode
-    by TMDB ID, season number, and episode number.
-    """
+    tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
     details = await db.get_media_details(
-        tmdb_id=tmdb_id, 
+        tmdb_id=tmdb_id_val, 
         season_number=season_number, 
-        episode_number=episode_number
+        episode_number=episode_number,
+        title=title
     )
 
     if not details:
@@ -369,5 +430,352 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
         content=body,
         headers=headers,
         )
+
+# --- Admin Management Endpoints ---
+
+@app.get("/api/admin/external/search")
+async def admin_external_search(
+    query: str = Query(...),
+    media_type: str = Query(..., regex="^(movie|tv)$"),
+    source: str = Query("tmdb", regex="^(tmdb|imdb)$")
+):
+    if source == "tmdb":
+        return await search_tmdb(query, media_type)
+    else:
+        return await search_imdb(query, media_type)
+
+@app.get("/api/admin/external/details")
+async def admin_external_details(
+    id: str = Query(...),
+    media_type: str = Query(..., regex="^(movie|tv)$"),
+    source: str = Query("tmdb", regex="^(tmdb|imdb)$")
+):
+    details = await get_external_details(id, media_type, source)
+    if not details:
+        raise HTTPException(status_code=404, detail="External details not found")
+    return details
+
+@app.post("/api/admin/media/add")
+async def admin_add_media(media_data: Dict[str, Any]):
+    try:
+        if media_data.get("media_type") == "movie":
+            # Using update_movie which handles upsert
+            doc = MovieSchema(**media_data)
+            res = await db.update_movie(doc)
+        else:
+            doc = TVShowSchema(**media_data)
+            res = await db.update_tv_show(doc)
+        
+        if res:
+            return {"message": "Media added/updated successfully", "id": str(res)}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to add media")
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/media/{media_type}/{tmdb_id}")
+@app.post("/api/admin/media/{media_type}/{tmdb_id}/delete")
+async def admin_delete_media(
+    media_type: str, 
+    tmdb_id: str, 
+    title: Optional[str] = Query(None),
+    doc_id: Optional[str] = Query(None)
+):
+    try:
+        tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+        success = await db.delete_document(media_type, tmdb_id_val, title, doc_id)
+        if success:
+            return {"message": "Media deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Media not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/admin/media/{media_type}/{tmdb_id}/details")
+async def admin_update_media_details(media_type: str, tmdb_id: str, updated_data: Dict[str, Any]):
+    try:
+        tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+        success = await db.update_media_details(media_type, tmdb_id_val, updated_data)
+        if success:
+            return {"message": "Media details updated"}
+        else:
+            raise HTTPException(status_code=404, detail="Media not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/admin/media/{media_type}/{tmdb_id}/quality/{quality_id}")
+@app.post("/api/admin/media/{media_type}/{tmdb_id}/quality/{quality_id}/delete")
+async def admin_delete_quality(
+    media_type: str, 
+    tmdb_id: str, 
+    quality_id: str,
+    season: Optional[int] = Query(None),
+    episode: Optional[int] = Query(None),
+    title: Optional[str] = Query(None),
+    doc_id: Optional[str] = Query(None)
+):
+    tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+    success = await db.delete_quality_link(media_type, tmdb_id_val, quality_id, season, episode, title, doc_id)
+    if success:
+        return {"message": "Quality link deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Quality link not found")
+
+@app.put("/api/admin/media/{media_type}/{tmdb_id}/quality/{quality_id}")
+async def admin_update_quality(
+    media_type: str, 
+    tmdb_id: str, 
+    quality_id: str,
+    updated_data: Dict[str, Any],
+    season: Optional[int] = Query(None),
+    episode: Optional[int] = Query(None)
+):
+    tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+    success = await db.update_quality_link(media_type, tmdb_id_val, quality_id, updated_data, season, episode)
+    if success:
+        return {"message": "Quality link updated successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Quality link not found")
+
+@app.delete("/api/admin/media/tv/{tmdb_id}/season/{season_number}")
+async def admin_delete_season(tmdb_id: str, season_number: int):
+    tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+    success = await db.delete_season(tmdb_id_val, season_number)
+    if success:
+        return {"message": f"Season {season_number} deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Season not found")
+
+@app.delete("/api/admin/media/tv/{tmdb_id}/season/{season_number}/episode/{episode_number}")
+async def admin_delete_episode(tmdb_id: str, season_number: int, episode_number: int):
+    tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+    success = await db.delete_episode(tmdb_id_val, season_number, episode_number)
+    if success:
+        return {"message": f"Episode {episode_number} deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+@app.put("/api/admin/media/tv/{tmdb_id}/season/{season_number}/episode/{episode_number}")
+async def admin_update_episode(tmdb_id: str, season_number: int, episode_number: int, updated_data: Dict[str, Any]):
+    tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+    success = await db.update_episode(tmdb_id_val, season_number, episode_number, updated_data)
+    if success:
+        return {"message": "Episode updated successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+@app.delete("/api/admin/manual/files/{file_id}")
+async def admin_delete_manual_file(file_id: str):
+    success = await db.delete_manual_file(file_id)
+    if success:
+        return {"message": "Manual file removed"}
+    else:
+        raise HTTPException(status_code=404, detail="File not found")
+
+@app.delete("/api/admin/manual/bulk_delete")
+async def admin_bulk_delete_manual_files(payload: Dict[str, Any]):
+    file_ids = payload.get("file_ids", [])
+    deleted = 0
+    for fid in file_ids:
+        if await db.delete_manual_file(fid):
+            deleted += 1
+    return {"message": f"Deleted {deleted} files."}
+
+@app.get("/api/admin/manual/files")
+async def admin_get_manual_files(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1),
+    query: Optional[str] = Query(None)
+):
+    res = await db.get_unlinked_files(page, page_size, query)
+    for file in res.get("files", []):
+        parsed = PTN.parse(file["name"])
+        file["detected"] = {
+            "quality": parsed.get("resolution"),
+            "season": parsed.get("season"),
+            "episode": parsed.get("episode"),
+            "title": parsed.get("title")
+        }
+    return res
+
+@app.post("/api/admin/manual/link")
+async def admin_link_manual_file(payload: Dict[str, Any]):
+    # payload: { file_id, tmdb_id, media_type, season, episode, quality, title }
+    try:
+        file_id = payload.get("file_id")
+        tmdb_id = payload.get("tmdb_id")
+        media_type = payload.get("media_type")
+        title = payload.get("title")
+        
+        # Fetch file details from manual_files
+        file_doc = await db.manual_collection.find_one({"_id": ObjectId(file_id)})
+        if not file_doc:
+            raise HTTPException(status_code=404, detail="File not found in manual database")
+        
+        # Smart metadata extraction from filename
+        filename = file_doc["name"]
+        parsed = PTN.parse(filename)
+        
+        # 1. Detect Languages (PTN first, then fallback to filename scan)
+        raw_langs = parsed.get("language")
+        if not raw_langs:
+            # Secondary scan: check filename for common language markers
+            possible_langs = ["tamil", "telugu", "hindi", "malayalam", "kannada", "english", "bengali", "marathi", "gujarati", "punjabi", "french", "spanish", "jap", "kor", "tam", "tel", "hin", "mal", "kan", "eng", "ben", "mar", "guj", "pun", "fra", "spa"]
+            filename_lower = filename.lower()
+            raw_langs = [lang for lang in possible_langs if lang in filename_lower]
+            
+        detected_languages = normalize_languages(raw_langs)
+        
+        # 2. Detect Quality (Payload first, then PTN, then default)
+        detected_quality = payload.get("quality") or parsed.get("resolution") or "Unknown"
+
+        LOGGER.info(f"Manual Link Detection: file={filename}, langs={detected_languages}, quality={detected_quality}")
+
+        from Backend.helper.encrypt import encode_string
+        # Check for required fields to avoid 500 error
+        if not all(k in file_doc for k in ["chat_id", "msg_id", "hash"]):
+            raise HTTPException(status_code=400, detail="Incomplete file record (missing chat_id, msg_id, or hash). Try Synchronizing Repository.")
+            
+        data = {"chat_id": file_doc["chat_id"], "msg_id": file_doc["msg_id"], "hash": file_doc["hash"]}
+        encoded_id = await encode_string(data)
+        quality_detail = {
+            "quality": detected_quality,
+            "id": encoded_id,
+            "name": filename,
+            "size": file_doc["size"]
+        }
+        
+        query = {"tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]}}
+        if title:
+            query["title"] = title
+
+        if media_type == "movie":
+            # Link to movie
+            update_op = {
+                "$push": {"telegram": quality_detail}
+            }
+            if detected_languages:
+                update_op["$addToSet"] = {"languages": {"$each": detected_languages}}
+
+            result = await db.movie_collection.update_one(query, update_op)
+        else:
+            # Link to TV episode
+            season_num = int(payload.get("season"))
+            episode_num = int(payload.get("episode"))
+            
+            # Ensure Season exists
+            await db.tv_collection.update_one(
+                {"tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]}, "seasons.season_number": {"$ne": season_num}},
+                {"$push": {"seasons": {"season_number": season_num, "episodes": []}}}
+            )
+            # Ensure Episode exists in that season
+            await db.tv_collection.update_one(
+                {
+                    "tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]},
+                    "seasons": {
+                        "$elemMatch": {
+                            "season_number": season_num,
+                            "episodes.episode_number": {"$ne": episode_num}
+                        }
+                    }
+                },
+                {"$push": {"seasons.$.episodes": {
+                    "episode_number": episode_num, 
+                    "title": f"Episode {episode_num}", 
+                    "episode_backdrop": "", 
+                    "telegram": []
+                }}}
+            )
+
+            update_op = {
+                "$push": {"seasons.$[s].episodes.$[e].telegram": quality_detail}
+            }
+            if detected_languages:
+                update_op["$addToSet"] = {"languages": {"$each": detected_languages}}
+
+            result = await db.tv_collection.update_one(
+                query,
+                update_op,
+                array_filters=[
+                    {"s.season_number": season_num},
+                    {"e.episode_number": episode_num}
+                ]
+            )
+        
+        if result.modified_count > 0:
+            await db.link_manual_file(file_id)
+            return {"message": "File linked successfully"}
+        else:
+            raise HTTPException(status_code=400, detail=f"Failed to link. Target media (ID: {tmdb_id}) not found or structure invalid (missing Season/Episode).")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid data types in request: {str(e)}")
+    except Exception as e:
+        LOGGER.error(f"Link error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@app.post("/api/admin/manual/bulk_link")
+async def admin_bulk_link_manual_files(payload: Dict[str, Any]):
+    # payload: { file_ids: [], tmdb_id, media_type, title, quality, season, episode }
+    file_ids = payload.get("file_ids", [])
+    tmdb_id = payload.get("tmdb_id")
+    media_type = payload.get("media_type")
+    title = payload.get("title")
+    
+    success_count = 0
+    errors = []
+    
+    for fid in file_ids:
+        try:
+            # We reuse the logic but allow override or auto-detect
+            # We simulate a single link call for each
+            # To handle TV shows with auto S/E, we need to re-parse per file
+            file_doc = await db.manual_collection.find_one({"_id": ObjectId(fid)})
+            if not file_doc: continue
+            
+            parsed = PTN.parse(file_doc["name"])
+            
+            # For bulk, if season/episode not in payload, use detected
+            f_season = payload.get("season") or parsed.get("season")
+            f_episode = payload.get("episode") or parsed.get("episode")
+            f_quality = payload.get("quality") or parsed.get("resolution") or "Unknown"
+            
+            # Prepare dummy payload for single link call
+            link_payload = {
+                "file_id": fid,
+                "tmdb_id": tmdb_id,
+                "media_type": media_type,
+                "title": title,
+                "quality": f_quality,
+                "season": f_season,
+                "episode": f_episode
+            }
+            
+            res = await admin_link_manual_file(link_payload)
+            success_count += 1
+        except Exception as e:
+            errors.append(f"File {fid}: {str(e)}")
+            
+    return {"message": f"Successfully linked {success_count} files.", "errors": errors}
+
+@app.get("/api/admin/backup")
+async def admin_backup():
+    try:
+        data = await db.get_all_data()
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/restore")
+async def admin_restore(data: dict):
+    try:
+        success = await db.restore_all_data(data)
+        if success:
+            return {"message": "Database restored successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to restore database")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     
     

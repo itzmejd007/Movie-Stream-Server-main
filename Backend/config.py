@@ -13,6 +13,7 @@ class Telegram:
     PORT = int(getenv("PORT", "8000"))
     BASE_URL = getenv("BASE_URL", "0.0.0.0").rstrip('/')
     AUTH_CHANNEL = [channel.strip() for channel in (getenv("AUTH_CHANNEL") or "").split(",") if channel.strip()]
+    MANUAL_CHANNEL = [channel.strip() for channel in (getenv("MANUAL_CHANNEL") or "").split(",") if channel.strip()]
     DATABASE = getenv("DATABASE", "").split(", ")
     TMDB_API = getenv("TMDB_API", "")
     IMDB_API = getenv("IMDB_API", "")

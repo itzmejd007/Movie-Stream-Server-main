@@ -9,9 +9,9 @@ from Backend.helper.metadata import metadata
 from Backend.helper.pyro import clean_filename, get_readable_file_size, remove_urls
 from Backend.pyrofork import StreamBot
 from pyrogram import filters, Client
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from os import path as ospath
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, UserNotParticipant
 from pyrogram.enums.parse_mode import ParseMode
 from themoviedb import aioTMDb
 from asyncio import Queue, create_task
@@ -121,6 +121,36 @@ async def delete_messages_after_delay(messages):
 async def start(bot: Client, message: Message):
     LOGGER.info(f"Received command: {message.text}")
     
+    # Force Subscribe Check
+    settings = await db.get_settings()
+    fsub_channel = settings.get("fsubChannel")
+    
+    if fsub_channel:
+        try:
+            await bot.get_chat_member(fsub_channel, message.from_user.id)
+        except UserNotParticipant:
+            try:
+                chat = await bot.get_chat(fsub_channel)
+                join_url = f"https://t.me/{chat.username}" if chat.username else (await bot.export_chat_invite_link(chat.id))
+                
+                # Check if there is data in start command to preserve
+                start_data = message.text.split('start ')[-1] if 'start ' in message.text else ""
+                verify_url = f"https://t.me/{(await bot.get_me()).username}?start={start_data}"
+                
+                return await message.reply_text(
+                    f"👋 **Hello {message.from_user.first_name}!**\n\n"
+                    f"To access the requested file, you must first join our update channel. "
+                    f"This helps us keep you informed about new content and site updates.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📢 Join Channel", url=join_url)],
+                        [InlineKeyboardButton("🔄 Verified - Try Again", url=verify_url)]
+                    ])
+                )
+            except Exception as e:
+                LOGGER.error(f"Error in FSub join logic: {e}")
+        except Exception as e:
+            LOGGER.error(f"Error checking FSub membership: {e}")
+
     command_part = message.text.split('start ')[-1]
     
     if command_part.startswith("file_"):
@@ -252,29 +282,50 @@ for _ in range(1):  # Two concurrent workers
     )
 )
 async def file_receive_handler(bot: Client, message: Message):
-    if str(message.chat.id) in Telegram.AUTH_CHANNEL:
+    chat_id_str = str(message.chat.id)
+    is_auth = chat_id_str in Telegram.AUTH_CHANNEL
+    is_manual = chat_id_str in Telegram.MANUAL_CHANNEL
+
+    if is_auth or is_manual:
         try:
             if message.video or message.document:
                 file = message.video or message.document
-                if Telegram.USE_CAPTION:
+                if Telegram.USE_CAPTION and message.caption:
                     title = message.caption.replace("\n", "\\n")
                 else:
                     title = file.file_name or file.file_id
+                
                 msg_id = message.id
                 hash = file.file_unique_id[:6]
                 size = get_readable_file_size(file.file_size)
-                channel = str(message.chat.id).replace("-100","")
+                channel = chat_id_str.replace("-100","")
                 
-                metadata_info = await metadata(clean_filename(title), message)
-                if metadata_info is None:
-                    return
+                # Improve file display name filtering for manual database
+                display_name = remove_urls(title)
+                display_name = clean_filename(display_name)
+                
+                if not display_name.lower().endswith('.mkv') and not display_name.lower().endswith('.mp4'):
+                    display_name += '.mkv'
 
+                if is_manual:
+                    # Save to manual database for manual linking
+                    manual_data = {
+                        "chat_id": int(channel),
+                        "msg_id": msg_id,
+                        "hash": hash,
+                        "size": size,
+                        "name": display_name,
+                        "original_name": title
+                    }
+                    await db.insert_manual_file(manual_data)
 
-                # Add file data to the queue for processing
-                title = remove_urls(title)
-                if not title.endswith('.mkv'):
-                    title += '.mkv'
-                await file_queue.put((metadata_info, hash, int(channel), msg_id, size, title))
+                if is_auth:
+                    # Proceed with automatic fetch
+                    metadata_info = await metadata(clean_filename(title), message)
+                    if metadata_info is not None:
+                        # Add file data to the queue for processing
+                        # Use the same cleaned display_name for consistency
+                        await file_queue.put((metadata_info, hash, int(channel), msg_id, size, display_name))
 
             else:
                 await message.reply_text("Not supported")
@@ -319,6 +370,44 @@ async def set_id(bot: Client, message: Message):
             await message.reply_text("Removed default ID.")
     except Exception as e:
         await message.reply_text(f"An error occurred: {e}")
+
+@StreamBot.on_message(filters.command("fsub") & filters.private & CustomFilters.owner)
+async def set_fsub(bot: Client, message: Message):
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            return await message.reply_text("❌ Usage: `/fsub <channel_id/username>` or `/fsub off`")
+        
+        target = args[1]
+        
+        if target.lower() == "off":
+            settings = await db.get_settings()
+            settings["fsubChannel"] = None
+            from Backend.helper.modal import SettingsSchema
+            await db.update_settings(SettingsSchema(**settings))
+            return await message.reply_text("✅ Force-Subscribe has been disabled.")
+
+        # Check if bot is admin in the channel
+        try:
+            chat = await bot.get_chat(target)
+            member = await bot.get_chat_member(chat.id, "me")
+            if member.status not in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER):
+                return await message.reply_text("❌ Bot is not an admin in this channel. Make me admin first!")
+            
+            # Update settings
+            settings = await db.get_settings()
+            settings["fsubChannel"] = str(chat.id) if chat.username is None else chat.username
+            from Backend.helper.modal import SettingsSchema
+            await db.update_settings(SettingsSchema(**settings))
+            
+            await message.reply_text(f"✅ Force-Subscribe successfully set to **{chat.title}** ({settings['fsubChannel']})")
+            
+        except Exception as e:
+            await message.reply_text(f"❌ Error accesssing channel: {str(e)}")
+
+    except Exception as e:
+        LOGGER.error(f"Error in /fsub: {e}")
+        await message.reply_text("❌ An internal error occurred.")
 
 
 

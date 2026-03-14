@@ -35,7 +35,7 @@ sudo apt install python3 python3-venv python3-pip git -y
 
 ---
 
-# 📁 3. Deploy Your App
+# 📁 3. Deploy Your App (VPS / AWS)
 
 Clone your project:
 
@@ -59,24 +59,7 @@ pip install -r requirements.txt
 
 ---
 
-# 🏗 5. Run/Stop FastAPI in Production
-
-To Run:
-
-```bash
-nohup python -m Backend
-
-```
-
-To Stop:
-
-```bash
-sudo pkill -f python
-```
-
----
-
-# 🌐 7. Domain Setup
+# 🌐 4. Domain Setup (VPS / AWS)
 
 In your DNS (Hostinger / etc.):
 
@@ -90,7 +73,7 @@ TTL: `300`
 
 ---
 
-# 🔐 8. Install Caddy (Best Reverse Proxy + Auto SSL)
+# 🔐 5. Install Caddy (Best Reverse Proxy + Auto SSL)
 
 Install:
 
@@ -126,7 +109,28 @@ sudo systemctl status caddy
 
 ---
 
-# 🌍 9. AWS Specific Steps
+# 🏗 6. Run/Stop FastAPI in Production
+
+To Run:
+
+```bash
+nohup python -m Backend
+
+```
+
+To Stop:
+
+```bash
+sudo pkill -f python
+# or
+ps -ef | grep python # Now kill the process using PID
+kill <PID> # eg: kill 64182
+```
+
+---
+
+
+# 🌍 7. AWS Specific Steps
 
 ## Open Security Group Ports
 
@@ -146,7 +150,7 @@ Add inbound rules:
 
 ---
 
-# ☁ 10. If Using Cloudflare
+# ☁ 8. If Using Cloudflare
 
 DNS → Orange Cloud (Proxied)
 
@@ -172,7 +176,7 @@ FastAPI App
 
 ---
 
-# 📊 11. Monitoring Commands
+# 📊 Monitoring Commands
 
 Check FastAPI:
 
@@ -195,7 +199,7 @@ journalctl -u caddy -f
 
 ---
 
-# 🛡 12. Production Improvements (Recommended)
+# 🛡 Production Improvements (Recommended) (Optional)
 
 ### Enable Firewall
 
@@ -208,7 +212,7 @@ sudo ufw enable
 
 ---
 
-### Enable Swap (For 1GB servers)
+### Enable Swap (For 1GB servers) (Optional)
 
 ```bash
 sudo fallocate -l 1G /swapfile
@@ -216,12 +220,6 @@ sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
 ```
-
----
-
-### Use PM2 (Alternative to systemd)
-
-If Node + Python hybrid setup.
 
 ---
 

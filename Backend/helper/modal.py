@@ -19,9 +19,11 @@ class Season(BaseModel):
     episodes: List[Episode] = Field(..., description="List of episodes in the season")
 
 class TVShowSchema(BaseModel):
+    id: Optional[str] = Field(None, alias="_id")
     tmdb_id: int = Field(..., description="The TMDB ID of the TV show")
     title: str = Field(..., description="Title of the TV show")
     genres: List[str] = Field(..., description="List of genres associated with the TV show")
+    languages: List[str] = Field(default=[], description="Audio languages available for the show")
     description: str = Field(..., description="Brief description of the TV show")
     rating: float = Field(..., description="Average rating of the TV show")
     release_year: int = Field(..., description="Release year of the TV show")
@@ -32,13 +34,13 @@ class TVShowSchema(BaseModel):
     media_type: str = Field(..., description="Media Type of the file")
     status: str = Field(..., description="Status update of tv show")
     updated_on: datetime = Field(default_factory=datetime.utcnow, description="Timestamp of the last update")
-    languages: List[str] = Field(..., description="List of languages associated with the Movie")
     rip: str = Field(..., description="Media rip of the file")
     seasons: List[Season] = Field(..., description="List of seasons in the TV show")
 
 
 
 class MovieSchema(BaseModel):
+    id: Optional[str] = Field(None, alias="_id")
     tmdb_id: int = Field(..., description="The TMDB ID of the Movie")
     title: str = Field(..., description="Title of the Movie")
     genres: List[str] = Field(..., description="List of genres associated with the Movie")
@@ -50,7 +52,7 @@ class MovieSchema(BaseModel):
     media_type: str = Field(..., description="Media Type of the file")
     runtime: int = Field(..., description="runtime of the movie")
     updated_on: datetime = Field(default_factory=datetime.utcnow, description="Timestamp of the last update")
-    languages: List[str] = Field(..., description="List of languages associated with the Movie")
+    languages: List[str] = Field(default=[], description="List of languages associated with the Movie")
     rip: str = Field(..., description="Media rip of the file")
     telegram: Optional[List[QualityDetail]] = Field(None, description="List of available quality details")
 
@@ -71,3 +73,7 @@ class SettingsSchema(BaseModel):
     adTop: Optional[str] = Field(None, description="HTML/JS snippet for Top Navbar Ad")
     siteName: Optional[str] = Field(None, description="Site name for display")
     telegramUrl: Optional[str] = Field(None, description="Telegram community URL")
+    tgUsername: Optional[str] = Field(None, description="Telegram bot username")
+    fsubChannel: Optional[str] = Field(None, description="Force subscribe channel ID or username")
+    shortenerApiUrl: Optional[str] = Field(None, description="Shortener API URL")
+    shortenerApiKey: Optional[str] = Field(None, description="Shortener API Key")
