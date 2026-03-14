@@ -371,9 +371,10 @@ class Database:
         skip = (page - 1) * page_size
         
         # Pipeline to get the latest from both collections
+        # We increase the limit slightly to ensure we have enough for merging
         pipeline = [
             {"$sort": {"updated_on": DESCENDING}},
-            {"$limit": skip + page_size}
+            {"$limit": skip + page_size * 2} 
         ]
 
         movie_results = await self.movie_collection.aggregate(pipeline).to_list(None)
@@ -381,12 +382,21 @@ class Database:
 
         # Merge, sort by updated_on, and paginate
         combined = movie_results + tv_results
-        combined.sort(key=lambda x: x.get("updated_on", datetime.min), reverse=True)
+        
+        # Robust sort handles cases where updated_on might be None or missing
+        combined.sort(
+            key=lambda x: x.get("updated_on") if isinstance(x.get("updated_on"), datetime) else datetime.min, 
+            reverse=True
+        )
         
         paginated_results = combined[skip:skip+page_size]
 
+        # Total count should be correctly calculated or estimated
+        total_movies = await self.movie_collection.count_documents({})
+        total_tv = await self.tv_collection.count_documents({})
+
         return {
-            "total_count": len(combined),
+            "total_count": total_movies + total_tv,
             "results": [self._convert_object_id(doc) for doc in paginated_results]
         }
 
