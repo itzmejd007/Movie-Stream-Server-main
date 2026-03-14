@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Union
 from bson import ObjectId
 from fastapi import HTTPException
@@ -20,6 +20,7 @@ class Database:
         self.movie_collection = None
         self.settings_collection = None
         self.deploy_config = None
+        self.view_analytics = None
         self.connection_uri = connection_uri
         self.db_name = db_name
 
@@ -38,6 +39,7 @@ class Database:
             self.settings_collection = self.db["settings"]
             self.deploy_config = self.db["deploy_config"]
             self.manual_collection = self.db["manual_files"]
+            self.view_analytics = self.db["view_analytics"]
 
             LOGGER.info("Database connection established")
         
@@ -225,6 +227,7 @@ class Database:
                 media_type=metadata_info['media_type'],
                 languages=metadata_info['languages'],
                 rip=metadata_info['rip'],
+                views=0, # Initial views
                 telegram=[
                     QualityDetail(
                         quality=metadata_info.get('quality') or 'Unknown',
@@ -250,6 +253,7 @@ class Database:
                 total_episodes=metadata_info['total_episodes'],
                 languages=metadata_info['languages'],
                 rip=metadata_info['rip'],
+                views=0, # Initial views
                 seasons=[
                     Season(
                         season_number=metadata_info['season_number'],
@@ -768,29 +772,108 @@ class Database:
         """Delete a manual file entry."""
         result = await self.manual_collection.delete_one({"_id": ObjectId(file_id)})
         return result.deleted_count > 0
-
     async def get_analytics(self) -> dict:
-        """Fetch platform analytics."""
+        """Fetch general library statistics and view analytics."""
         total_movies = await self.movie_collection.count_documents({})
         total_tv = await self.tv_collection.count_documents({})
         total_manual = await self.manual_collection.count_documents({"is_linked": {"$ne": True}})
-        
+
         # Latest entries
         latest_movies = await self.movie_collection.find().sort("updated_on", DESCENDING).limit(5).to_list(None)
         latest_tv = await self.tv_collection.find().sort("updated_on", DESCENDING).limit(5).to_list(None)
+
+        # View statistics
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_start = today_start - timedelta(days=1)
+        month_start = today_start - timedelta(days=30)
+        
+        today_views = await self.view_analytics.count_documents({"timestamp": {"$gte": today_start}})
+        yesterday_views = await self.view_analytics.count_documents({"timestamp": {"$gte": yesterday_start, "$lt": today_start}})
+        monthly_views = await self.view_analytics.count_documents({"timestamp": {"$gte": month_start}})
+        total_views_all = await self.view_analytics.count_documents({})
+
+        # Top Viewed
+        top_movies = await self.movie_collection.find().sort("views", DESCENDING).limit(5).to_list(None)
+        top_tv = await self.tv_collection.find().sort("views", DESCENDING).limit(5).to_list(None)
 
         return {
             "stats": {
                 "movies": total_movies,
                 "tv_shows": total_tv,
                 "manual_files": total_manual,
-                "total_content": total_movies + total_tv
+                "total_content": total_movies + total_tv,
+                "today_views": today_views,
+                "yesterday_views": yesterday_views,
+                "monthly_views": monthly_views,
+                "total_views": total_views_all
             },
             "recent": {
-                "movies": [self._convert_object_id(m) for m in latest_movies],
-                "tv_shows": [self._convert_object_id(t) for t in latest_tv]
+                "movies": [MovieSchema(**self._convert_object_id(m)) for m in latest_movies],
+                "tv_shows": [TVShowSchema(**self._convert_object_id(t)) for t in latest_tv]
+            },
+            "top_viewed": {
+                "movies": [MovieSchema(**self._convert_object_id(m)) for m in top_movies],
+                "tv_shows": [TVShowSchema(**self._convert_object_id(t)) for t in top_tv]
             }
         }
+
+    async def get_view_graph_data(self, period: str = "week") -> List[dict]:
+        """Fetch daily view counts for the given period."""
+        from datetime import timedelta
+        end_date = datetime.utcnow()
+        if period == "yesterday":
+            start_date = end_date - timedelta(days=2)
+        elif period == "week":
+            start_date = end_date - timedelta(days=7)
+        elif period == "month":
+            start_date = end_date - timedelta(days=30)
+        elif period == "year":
+            start_date = end_date - timedelta(days=365)
+        else: # max
+            start_date = datetime(2025, 1, 1) # Arbitrary start
+
+        pipeline = [
+            {"$match": {"timestamp": {"$gte": start_date}}},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$timestamp"}},
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"_id": 1}}
+        ]
+        results = await self.view_analytics.aggregate(pipeline).to_list(None)
+        return [{"date": r["_id"], "views": r["count"]} for r in results]
+
+    async def increment_view(self, media_type: str, tmdb_id: Union[int, str], identifier: str = None) -> bool:
+        """Increment view count and log to analytics (unique per ID per day)."""
+        collection = self.movie_collection if media_type in ["mov", "movie"] else self.tv_collection
+        
+        # Unique check: Check if this identifier viewed this content today
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        if identifier:
+            exists = await self.view_analytics.find_one({
+                "tmdb_id": int(tmdb_id),
+                "identifier": identifier,
+                "timestamp": {"$gte": today_start}
+            })
+            if exists:
+                return False
+
+        # Update total views
+        result = await collection.update_one(
+            {"tmdb_id": {"$in": [int(tmdb_id), str(tmdb_id)]}},
+            {"$inc": {"views": 1}}
+        )
+        
+        if result.matched_count > 0:
+            # Log to time-series analytics
+            await self.view_analytics.insert_one({
+                "media_type": media_type,
+                "tmdb_id": int(tmdb_id),
+                "identifier": identifier,
+                "timestamp": datetime.utcnow()
+            })
+            return True
+        return False
 
     async def update_media_details(self, media_type: str, tmdb_id: Union[int, str], updated_data: dict) -> bool:
         """Update core metadata for a movie or TV show using optional originalTitle for versioning."""

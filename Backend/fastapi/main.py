@@ -165,6 +165,18 @@ async def get_trending_media(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.post("/api/view/{media_type}/{tmdb_id}")
+async def increment_media_view(request: Request, media_type: str, tmdb_id: Union[int, str]):
+    try:
+        client_ip = request.client.host
+        success = await db.increment_view(media_type, tmdb_id, identifier=client_ip)
+        if success:
+            return {"message": "View incremented"}
+        else:
+            return {"message": "View already counted or media not found"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/settings", response_model=dict)
 async def get_site_settings():
     try:
@@ -185,9 +197,11 @@ async def update_site_settings(settings: SettingsSchema):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/admin/analytics")
-async def admin_analytics():
+async def admin_analytics(period: str = Query("week")):
     try:
-        return await db.get_analytics()
+        stats = await db.get_analytics()
+        graph_data = await db.get_view_graph_data(period)
+        return {**stats, "graph_data": graph_data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
