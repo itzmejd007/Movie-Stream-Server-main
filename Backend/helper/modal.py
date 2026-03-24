@@ -75,6 +75,7 @@ class SettingsSchema(BaseModel):
     adTop: Optional[str] = Field(None, description="HTML/JS snippet for Top Navbar Ad")
     siteName: Optional[str] = Field(None, description="Site name for display")
     telegramUrl: Optional[str] = Field(None, description="Telegram community URL")
+    tgUsername: Optional[str] = Field(None, description="Telegram Bot Username (without @)")
     fsubChannel: Optional[str] = Field(None, description="Force subscribe channel ID or username")
     showViews: bool = Field(default=True, description="Toggle to show views on media posts")
     shortenerApiUrl: Optional[str] = Field(None, description="Shortener API URL")
