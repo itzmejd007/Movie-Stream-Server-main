@@ -10,7 +10,7 @@ class Telegram:
     API_HASH = getenv("API_HASH", "")
     BOT_TOKEN = getenv("BOT_TOKEN", "")
     FRONTEND_LINK = getenv("FRONTEND_LINK", "")
-    PORT = int(getenv("PORT", "8000"))
+    PORT = int(getenv("PORT", "7860"))
     BASE_URL = getenv("BASE_URL", "0.0.0.0").rstrip('/')
     AUTH_CHANNEL = [channel.strip() for channel in (getenv("AUTH_CHANNEL") or "").split(",") if channel.strip()]
     MANUAL_CHANNEL = [channel.strip() for channel in (getenv("MANUAL_CHANNEL") or "").split(",") if channel.strip()]
