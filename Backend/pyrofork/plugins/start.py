@@ -232,7 +232,7 @@ async def start(bot: Client, message: Message):
 
 
 
-@StreamBot.on_message(filters.command('log') & filters.private & CustomFilters.owner)
+@StreamBot.on_message(filters.command('log') & filters.private & CustomFilters.admin)
 async def start(bot: Client, message: Message):
     try:
         path = ospath.abspath('log.txt')
@@ -253,6 +253,8 @@ from asyncio import Lock
 # Global lock for database access
 db_lock = Lock()
 
+from Backend.helper.notification import send_log_report
+
 async def process_file():
     while True:
         metadata_info, hash, channel, msg_id, size, title = await file_queue.get()
@@ -263,6 +265,8 @@ async def process_file():
 
             if updated_id:
                 LOGGER.info(f"{metadata_info['media_type']} updated with ID: {updated_id}")
+                # Send log report
+                await send_log_report(metadata_info, mode="Automatic")
             else:
                 LOGGER.info("Update failed due to validation errors.")
 
@@ -338,7 +342,7 @@ async def file_receive_handler(bot: Client, message: Message):
         await message.reply(text="Channel is not in AUTH_CHANNEL")
 
 
-@Client.on_message(filters.command('caption') & filters.private & CustomFilters.owner)
+@StreamBot.on_message(filters.command('caption') & filters.private & CustomFilters.admin)
 async def toggle_caption(bot: Client, message: Message):
     try:
         Telegram.USE_CAPTION = not Telegram.USE_CAPTION
@@ -346,7 +350,7 @@ async def toggle_caption(bot: Client, message: Message):
     except Exception as e:
         print(f"An error occurred: {e}")
 
-@Client.on_message(filters.command('tmdb') & filters.private & CustomFilters.owner)
+@StreamBot.on_message(filters.command('tmdb') & filters.private & CustomFilters.admin)
 async def toggle_tmdb(bot: Client, message: Message):
     try:
         Telegram.USE_TMDB = not Telegram.USE_TMDB
@@ -354,7 +358,7 @@ async def toggle_tmdb(bot: Client, message: Message):
     except Exception as e:
         print(f"An error occurred: {e}")
 
-@Client.on_message(filters.command('set') & filters.private & CustomFilters.owner)
+@StreamBot.on_message(filters.command('set') & filters.private & CustomFilters.admin)
 async def set_id(bot: Client, message: Message):
 
     url_part = message.text.split()[1:]  # Skip the command itself
@@ -371,7 +375,7 @@ async def set_id(bot: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"An error occurred: {e}")
 
-@StreamBot.on_message(filters.command("fsub") & filters.private & CustomFilters.owner)
+@StreamBot.on_message(filters.command("fsub") & filters.private & CustomFilters.admin)
 async def set_fsub(bot: Client, message: Message):
     try:
         args = message.text.split()
@@ -413,7 +417,70 @@ async def set_fsub(bot: Client, message: Message):
 
 
 
-@Client.on_message(filters.command('delete') & filters.private & CustomFilters.owner)
+@StreamBot.on_message(filters.command("convert") & filters.private & CustomFilters.admin)
+async def convert_link(bot: Client, message: Message):
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            return await message.reply_text("❌ Usage: `/convert <telegram_link>`")
+        
+        link = args[1]
+        # Example: https://t.me/c/12345678/123 or https://t.me/channel/123
+        parts = link.split("/")
+        if len(parts) < 5:
+            return await message.reply_text("❌ Invalid Telegram link format.")
+            
+        msg_id = int(parts[-1])
+        chat_id_part = parts[-2]
+        
+        # Resolve chat_id if it's a private channel (starts with c/)
+        if parts[-3] == "c":
+            chat_id = int("-100" + chat_id_part)
+        else:
+            chat_id = chat_id_part
+            
+        # Get the message to find the file
+        try:
+            tg_msg = await bot.get_messages(chat_id, msg_id)
+            if tg_msg.empty or not (tg_msg.document or tg_msg.video):
+                return await message.reply_text("❌ No file found in that message.")
+                
+            file = tg_msg.document or tg_msg.video
+            file_hash = file.file_unique_id[:6]
+            
+            # Search in database for this file
+            # In movies
+            movie = await db.movie_collection.find_one({"telegram.id": {"$regex": file_hash}})
+            if movie:
+                # Find the specific quality from the telegram array
+                quality_detail = next((q for q in movie["telegram"] if file_hash in q["id"]), None)
+                if quality_detail:
+                    start_link = f"https://t.me/{(await bot.get_me()).username}?start=file_{movie['tmdb_id']}_{quality_detail['quality']}"
+                    return await message.reply_text(f"✅ **Converted Link:**\n\n`{start_link}`")
+            
+            # In TV shows
+            tv = await db.tv_collection.find_one({"seasons.episodes.telegram.id": {"$regex": file_hash}})
+            if tv:
+                for season in tv.get("seasons", []):
+                    for episode in season.get("episodes", []):
+                        quality_detail = next((q for q in episode.get("telegram", []) if file_hash in q["id"]), None)
+                        if quality_detail:
+                            if "episode_number" in episode:
+                                start_link = f"https://t.me/{(await bot.get_me()).username}?start=file_{tv['tmdb_id']}_{season['season_number']}_{episode['episode_number']}_{quality_detail['quality']}"
+                            else:
+                                start_link = f"https://t.me/{(await bot.get_me()).username}?start=file_{tv['tmdb_id']}_{season['season_number']}_{quality_detail['quality']}"
+                            return await message.reply_text(f"✅ **Converted Link:**\n\n`{start_link}`")
+            
+            return await message.reply_text("❌ File found but it's not linked in the database.")
+            
+        except Exception as e:
+            return await message.reply_text(f"❌ Error fetching message: {str(e)}")
+
+    except Exception as e:
+        LOGGER.error(f"Error in /convert: {e}")
+        await message.reply_text(f"❌ An error occurred: {str(e)}")
+
+@StreamBot.on_message(filters.command('delete') & filters.private & CustomFilters.admin)
 async def delete(bot: Client, message: Message):
     try:
         split_text = message.text.split()
@@ -426,6 +493,7 @@ async def delete(bot: Client, message: Message):
         
         if len(path_parts) >= 3 and path_parts[-2] in ('ser', 'mov') and path_parts[-1].isdigit():
             media_type = path_parts[-2]
+            if media_type == "ser": media_type = "tv"
             tmdb_id = path_parts[-1]
             delete = await db.delete_document(media_type, int(tmdb_id))
             if delete:
@@ -437,4 +505,138 @@ async def delete(bot: Client, message: Message):
     
     except Exception as e:
         await message.reply_text(f"An error occurred: {str(e)}")
+
+@StreamBot.on_message(filters.command("admin") & filters.private & CustomFilters.admin)
+async def admin_panel(bot: Client, message: Message):
+    try:
+        total_movies = await db.movie_collection.count_documents({})
+        total_tv = await db.tv_collection.count_documents({})
+        total_unlinked = await db.manual_collection.count_documents({"is_linked": {"$ne": True}})
         
+        text = (
+            "<b>🎛 Admin Control Panel</b>\n\n"
+            f"<b>🎬 Total Movies:</b> <code>{total_movies}</code>\n"
+            f"<b>📺 Total TV Shows:</b> <code>{total_tv}</code>\n"
+            f"<b>📁 Unlinked Files:</b> <code>{total_unlinked}</code>\n"
+        )
+        
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Statistics", callback_data="admin_stats"),
+             InlineKeyboardButton("📜 Logs", callback_data="admin_logs")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
+             InlineKeyboardButton("🔄 Restart", callback_data="admin_restart")]
+        ])
+        
+        await message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        LOGGER.error(f"Error in /admin: {e}")
+        await message.reply_text("❌ Failed to load admin panel.")
+
+@StreamBot.on_callback_query()
+async def callback_handler(bot: Client, query):
+    if not await CustomFilters.admin_filter(bot, query):
+        return await query.answer("❌ You are not an admin!", show_alert=True)
+        
+    data = query.data
+    
+    if data == "admin_stats":
+        total_movies = await db.movie_collection.count_documents({})
+        total_tv = await db.tv_collection.count_documents({})
+        total_unlinked = await db.manual_collection.count_documents({"is_linked": {"$ne": True}})
+        
+        text = (
+            "<b>📊 Detailed Statistics</b>\n\n"
+            f"<b>🎥 Movies:</b> {total_movies}\n"
+            f"<b>📺 TV Series:</b> {total_tv}\n"
+            f"<b>📂 Orphan Files:</b> {total_unlinked}\n"
+        )
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="admin_back")]]), parse_mode=ParseMode.HTML)
+        
+    elif data == "admin_logs":
+        await query.answer("Sending logs...")
+        path = ospath.abspath('log.txt')
+        if ospath.exists(path):
+            await bot.send_document(query.message.chat.id, path, caption="Current Log File")
+        else:
+            await query.answer("Log file not found!", show_alert=True)
+            
+    elif data == "admin_settings":
+        text = "<b>⚙️ Bot Settings</b>\n\nToggle various bot features below:"
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"Caption: {'✅' if Telegram.USE_CAPTION else '❌'}", callback_data="toggle_caption")],
+            [InlineKeyboardButton(f"TMDB/IMDB: {'TMDB' if Telegram.USE_TMDB else 'IMDB'}", callback_data="toggle_tmdb")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="admin_back")]
+        ])
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+    elif data == "admin_restart":
+        if not await CustomFilters.owner_filter(bot, query):
+            return await query.answer("❌ Only owner can restart the bot!", show_alert=True)
+        await query.answer("Restarting...")
+        # Re-use existing restart logic
+        await restart(bot, query.message)
+        
+    elif data == "admin_back":
+        await admin_panel(bot, query.message)
+        
+    elif data == "toggle_caption":
+        Telegram.USE_CAPTION = not Telegram.USE_CAPTION
+        await callback_handler(bot, type('obj', (object,), {'data': 'admin_settings', 'message': query.message, 'answer': query.answer, 'edit_message_text': query.edit_message_text}))
+        
+    elif data == "toggle_tmdb":
+        Telegram.USE_TMDB = not Telegram.USE_TMDB
+        await callback_handler(bot, type('obj', (object,), {'data': 'admin_settings', 'message': query.message, 'answer': query.answer, 'edit_message_text': query.edit_message_text}))
+
+@StreamBot.on_message(filters.command("add_admin") & filters.private & CustomFilters.owner)
+async def add_admin(bot: Client, message: Message):
+    try:
+        args = message.text.split()
+        if len(args) != 2:
+            return await message.reply_text("❌ Usage: `/add_admin <user_id>`")
+        
+        user_id = int(args[1])
+        if await db.add_bot_admin(user_id):
+            await message.reply_text(f"✅ User ID `{user_id}` successfully added as bot administrator.")
+        else:
+            await message.reply_text("❌ Failed to add admin.")
+    except ValueError:
+        await message.reply_text("❌ User ID must be a number.")
+    except Exception as e:
+        LOGGER.error(f"Error in /add_admin: {e}")
+        await message.reply_text(f"❌ An error occurred: {e}")
+
+@StreamBot.on_message(filters.command("remove_admin") & filters.private & CustomFilters.owner)
+async def remove_admin(bot: Client, message: Message):
+    try:
+        args = message.text.split()
+        if len(args) != 2:
+            return await message.reply_text("❌ Usage: `/remove_admin <user_id>`")
+        
+        user_id = int(args[1])
+        if await db.remove_bot_admin(user_id):
+            await message.reply_text(f"✅ User ID `{user_id}` removed from administrators.")
+        else:
+            await message.reply_text("❌ Failed to remove admin.")
+    except ValueError:
+        await message.reply_text("❌ User ID must be a number.")
+    except Exception as e:
+        LOGGER.error(f"Error in /remove_admin: {e}")
+        await message.reply_text(f"❌ An error occurred: {e}")
+
+@StreamBot.on_message(filters.command("admins") & filters.private & CustomFilters.owner)
+async def list_admins(bot: Client, message: Message):
+    try:
+        admins = await db.get_bot_admins()
+        if not admins:
+            return await message.reply_text(f"👑 **Owner:** `{Telegram.OWNER_ID}`\n\nNo additional administrators added.")
+        
+        text = f"👑 **Owner:** `{Telegram.OWNER_ID}`\n\n"
+        text += "👮 **Administrators:**\n"
+        for uid in admins:
+            text += f"- `{uid}`\n"
+        
+        await message.reply_text(text)
+    except Exception as e:
+        LOGGER.error(f"Error in /admins: {e}")
+        await message.reply_text("❌ Failed to fetch admin list.")
+

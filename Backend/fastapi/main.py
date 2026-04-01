@@ -23,6 +23,7 @@ from Backend.helper.pyro import get_readable_time, normalize_languages
 from Backend.helper.modal import SettingsSchema, MovieSchema, TVShowSchema
 from Backend import StartTime, __version__, db
 from Backend.helper.metadata import search_tmdb, search_imdb, get_external_details, fetch_movie_metadata, metadata as get_media_metadata
+from Backend.helper.notification import send_log_report, send_bulk_log_report
 import PTN
 from bson import ObjectId
 
@@ -615,7 +616,7 @@ async def admin_get_manual_files(
     return res
 
 @app.post("/api/admin/manual/link")
-async def admin_link_manual_file(payload: Dict[str, Any]):
+async def admin_link_manual_file(payload: Dict[str, Any], send_report: bool = True):
     # payload: { file_id, tmdb_id, media_type, season, episode, quality, title }
     try:
         file_id = payload.get("file_id")
@@ -720,6 +721,11 @@ async def admin_link_manual_file(payload: Dict[str, Any]):
         
         if result.modified_count > 0:
             await db.link_manual_file(file_id)
+            # Send notification
+            if send_report:
+                metadata_info = await db.get_media_details(tmdb_id=tmdb_id, media_type=media_type)
+                if metadata_info:
+                    await send_log_report(metadata_info, mode="Manual")
             return {"message": "File linked successfully"}
         else:
             raise HTTPException(status_code=400, detail=f"Failed to link. Target media (ID: {tmdb_id}) not found or structure invalid (missing Season/Episode).")
@@ -766,11 +772,22 @@ async def admin_bulk_link_manual_files(payload: Dict[str, Any]):
                 "episode": f_episode
             }
             
-            res = await admin_link_manual_file(link_payload)
+            res = await admin_link_manual_file(link_payload, send_report=False)
             success_count += 1
         except Exception as e:
             errors.append(f"File {fid}: {str(e)}")
             
+    if success_count > 1:
+        metadata_info = await db.get_media_details(tmdb_id=tmdb_id, media_type=media_type)
+        if metadata_info:
+            await send_bulk_log_report(metadata_info, success_count, mode="Manual Bulk")
+    elif success_count == 1:
+        # Already handled by admin_link_manual_file if it was called? 
+        # Wait, bulk_link calls admin_link_manual_file for each.
+        # So Message 1 and 2 will be sent for EACH file.
+        # Maybe I should disable individual reports in bulk link?
+        pass
+
     return {"message": f"Successfully linked {success_count} files.", "errors": errors}
 
 @app.get("/api/admin/backup")

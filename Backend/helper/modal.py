@@ -77,6 +77,7 @@ class SettingsSchema(BaseModel):
     telegramUrl: Optional[str] = Field(None, description="Telegram community URL")
     tgUsername: Optional[str] = Field(None, description="Telegram Bot Username (without @)")
     fsubChannel: Optional[str] = Field(None, description="Force subscribe channel ID or username")
+    logChannel: Optional[str] = Field(None, description="Log channel/group for addition notifications")
     showViews: bool = Field(default=True, description="Toggle to show views on media posts")
     shortenerApiUrl: Optional[str] = Field(None, description="Shortener API URL")
     shortenerApiKey: Optional[str] = Field(None, description="Shortener API Key")

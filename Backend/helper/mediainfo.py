@@ -70,7 +70,10 @@ async def get_media_languages(message=None):
         stdout, stderr, code = await cmd_exec(ssplit(command))
         
         if code != 0:
-            LOGGER.error(f"ffprobe failed: {stderr}")
+            if "No such file or directory" in stderr or "not found" in stderr.lower():
+                LOGGER.error("ffprobe not found! Please install ffmpeg (sudo apt install ffmpeg)")
+            else:
+                LOGGER.error(f"ffprobe failed: {stderr}")
             return None
 
         # Parse JSON output to extract languages array

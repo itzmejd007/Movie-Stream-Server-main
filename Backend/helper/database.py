@@ -12,6 +12,26 @@ from Backend.helper.encrypt import encode_string
 from Backend.helper.modal import Episode, MovieSchema, QualityDetail, Season, TVShowSchema, SettingsSchema
 
 
+# Mapping for expanding language codes to multiple variations for filtering
+AUDIO_MAP = {
+    "ta": ["ta", "tam", "tamil"],
+    "hi": ["hi", "hin", "hindi"],
+    "en": ["en", "eng", "english"],
+    "te": ["te", "tel", "telugu"],
+    "ml": ["ml", "mal", "malayalam"],
+    "kn": ["kn", "kan", "kannada"],
+    "bn": ["bn", "ben", "bengali"],
+    "mr": ["mr", "mar", "marathi"],
+    "gu": ["gu", "guj", "gujarati"],
+    "pa": ["pa", "pun", "punjabi"],
+    "ja": ["ja", "jap", "japanese"],
+    "ko": ["ko", "kor", "korean"],
+    "es": ["es", "spa", "spanish"],
+    "fr": ["fr", "fra", "fre", "french"],
+    "de": ["de", "ger", "german"]
+}
+
+
 class Database:
     def __init__(self, connection_uri: str = Telegram.DATABASE, db_name: str = "projectS"):
         self._conn = None
@@ -105,10 +125,8 @@ class Database:
             return None
 
         existing_media = await self.tv_collection.find_one({
-            "$or": [
-                {"tmdb_id": tv_show_dict["tmdb_id"]},
-                {"title": tv_show_dict["title"], "release_year": tv_show_dict["release_year"]}
-            ]
+            "tmdb_id": int(tv_show_dict["tmdb_id"]),
+            "title": tv_show_dict["title"]
         })
 
         if not existing_media:
@@ -300,7 +318,14 @@ class Database:
             except ValueError:
                 pass
         if audio and audio.strip().lower() != "all":
-            match_stage["languages"] = {"$regex": f"^{audio}$", "$options": "i"}
+            audio_low = audio.strip().lower()
+            if audio_low in AUDIO_MAP:
+                # Expand to multiple variations using regex OR
+                variations = AUDIO_MAP[audio_low]
+                pattern = f"^({'|'.join(variations)})$"
+                match_stage["languages"] = {"$regex": pattern, "$options": "i"}
+            else:
+                match_stage["languages"] = {"$regex": f"^{audio}$", "$options": "i"}
         
         pipeline = []
         if match_stage:
@@ -341,7 +366,14 @@ class Database:
             except ValueError:
                 pass
         if audio and audio.strip().lower() != "all":
-            match_stage["languages"] = {"$regex": f"^{audio}$", "$options": "i"}
+            audio_low = audio.strip().lower()
+            if audio_low in AUDIO_MAP:
+                # Expand to multiple variations using regex OR
+                variations = AUDIO_MAP[audio_low]
+                pattern = f"^({'|'.join(variations)})$"
+                match_stage["languages"] = {"$regex": pattern, "$options": "i"}
+            else:
+                match_stage["languages"] = {"$regex": f"^{audio}$", "$options": "i"}
 
         pipeline = []
         if match_stage:
@@ -952,3 +984,41 @@ class Database:
         except Exception as e:
             LOGGER.error(f"Error restoring from backup: {e}")
             return False
+
+    async def add_bot_admin(self, user_id: int) -> bool:
+        """Add a user to the bot_admins collection."""
+        try:
+            await self.db["bot_admins"].update_one(
+                {"user_id": user_id},
+                {"$set": {"user_id": user_id, "added_on": datetime.utcnow()}},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error adding bot admin: {e}")
+            return False
+
+    async def remove_bot_admin(self, user_id: int) -> bool:
+        """Remove a user from the bot_admins collection."""
+        try:
+            await self.db["bot_admins"].delete_one({"user_id": user_id})
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error removing bot admin: {e}")
+            return False
+
+    async def get_bot_admins(self) -> List[int]:
+        """Get all user IDs from the bot_admins collection."""
+        try:
+            admins = await self.db["bot_admins"].find({}).to_list(None)
+            return [a["user_id"] for a in admins]
+        except Exception as e:
+            LOGGER.error(f"Error fetching bot admins: {e}")
+            return []
+
+    async def is_bot_admin(self, user_id: int) -> bool:
+        """Check if a user is an admin or owner."""
+        if user_id == Telegram.OWNER_ID:
+            return True
+        admin = await self.db["bot_admins"].find_one({"user_id": user_id})
+        return admin is not None
