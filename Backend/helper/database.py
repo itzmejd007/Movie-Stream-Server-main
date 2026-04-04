@@ -341,7 +341,15 @@ class Database:
         
         result = await self.tv_collection.aggregate(pipeline).to_list(1)
         total_count = result[0]["metadata"][0]["total_count"] if result[0]["metadata"] else 0
-        sorted_tv_shows = [TVShowSchema(**self._convert_object_id(doc)) for doc in result[0]["data"]]
+        
+        sorted_tv_shows = []
+        for doc in result[0]["data"]:
+            try:
+                sorted_tv_shows.append(TVShowSchema(**self._convert_object_id(doc)))
+            except Exception as e:
+                LOGGER.error(f"Validation error for TV show document {doc.get('_id')}: {e}")
+                continue
+                
         return {"total_count": total_count, "tv_shows": sorted_tv_shows}
 
     async def sort_movies(
@@ -389,7 +397,15 @@ class Database:
         
         result = await self.movie_collection.aggregate(pipeline).to_list(1)
         total_count = result[0]["metadata"][0]["total_count"] if result[0]["metadata"] else 0
-        sorted_movies = [MovieSchema(**self._convert_object_id(doc)) for doc in result[0]["data"]]
+        
+        sorted_movies = []
+        for doc in result[0]["data"]:
+            try:
+                sorted_movies.append(MovieSchema(**self._convert_object_id(doc)))
+            except Exception as e:
+                LOGGER.error(f"Validation error for movie document {doc.get('_id')}: {e}")
+                continue
+                
         return {"total_count": total_count, "movies": sorted_movies}
 
     async def get_trending_media(
@@ -427,9 +443,26 @@ class Database:
         total_movies = await self.movie_collection.count_documents({})
         total_tv = await self.tv_collection.count_documents({})
 
+        # Convert results using schemas for consistency (rating, media_type, etc.)
+        validated_results = []
+        for doc in paginated_results:
+            try:
+                # Identify if it's a movie or tv show to use the right schema
+                doc_id = doc.get("_id")
+                # We can check media_type or collection source (though they are merged here)
+                # Let's try TVShowSchema first if it looks like a TV show (has seasons)
+                if "seasons" in doc:
+                    validated_results.append(TVShowSchema(**self._convert_object_id(doc)).dict(by_alias=True))
+                else:
+                    validated_results.append(MovieSchema(**self._convert_object_id(doc)).dict(by_alias=True))
+            except Exception as e:
+                LOGGER.error(f"Validation error in trending media for doc {doc.get('_id')}: {e}")
+                # Fallback to convert_object_id if schema fails totally, although lenient schema should pass
+                validated_results.append(self._convert_object_id(doc))
+
         return {
             "total_count": total_movies + total_tv,
-            "results": [self._convert_object_id(doc) for doc in paginated_results]
+            "results": validated_results
         }
 
     async def find_similar_media(
