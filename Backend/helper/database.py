@@ -443,21 +443,29 @@ class Database:
         total_movies = await self.movie_collection.count_documents({})
         total_tv = await self.tv_collection.count_documents({})
 
-        # Convert results using schemas for consistency (rating, media_type, etc.)
+        # Ensure consistent data structure for frontend (rating, media_type, etc.)
         validated_results = []
         for doc in paginated_results:
             try:
-                # Identify if it's a movie or tv show to use the right schema
-                doc_id = doc.get("_id")
-                # We can check media_type or collection source (though they are merged here)
-                # Let's try TVShowSchema first if it looks like a TV show (has seasons)
-                if "seasons" in doc:
-                    validated_results.append(TVShowSchema(**self._convert_object_id(doc)).dict(by_alias=True))
+                # Modifying the document from _convert_object_id which returns a string ID
+                processed_doc = self._convert_object_id(doc)
+                
+                # Coerce rating to float to avoid toFixed errors in frontend
+                if "rating" in processed_doc:
+                    try:
+                        processed_doc["rating"] = float(processed_doc["rating"])
+                    except (TypeError, ValueError):
+                        processed_doc["rating"] = 0.0
                 else:
-                    validated_results.append(MovieSchema(**self._convert_object_id(doc)).dict(by_alias=True))
+                    processed_doc["rating"] = 0.0
+                
+                # Ensure media_type is present for HomeHero.jsx
+                if "media_type" not in processed_doc:
+                    processed_doc["media_type"] = "tv" if "seasons" in processed_doc else "movie"
+                
+                validated_results.append(processed_doc)
             except Exception as e:
-                LOGGER.error(f"Validation error in trending media for doc {doc.get('_id')}: {e}")
-                # Fallback to convert_object_id if schema fails totally, although lenient schema should pass
+                LOGGER.error(f"Error processing trending result: {e}")
                 validated_results.append(self._convert_object_id(doc))
 
         return {
