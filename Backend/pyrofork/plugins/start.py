@@ -23,7 +23,7 @@ from aiofiles import open as aiopen
 from pyrogram import enums
 
 
-tmdb = aioTMDb(key=Telegram.TMDB_API, language="en-US", region="US")
+tmdb = aioTMDb(api_key=Telegram.TMDB_API, language="en-US", region="US")
 # Initialize database connection
 import random
 import string
