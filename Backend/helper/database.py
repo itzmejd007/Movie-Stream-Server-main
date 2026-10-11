@@ -41,6 +41,7 @@ class Database:
         self.settings_collection = None
         self.deploy_config = None
         self.view_analytics = None
+        self.home_sections = None
         self.connection_uri = connection_uri
         self.db_name = db_name
 
@@ -60,6 +61,7 @@ class Database:
             self.deploy_config = self.db["deploy_config"]
             self.manual_collection = self.db["manual_files"]
             self.view_analytics = self.db["view_analytics"]
+            self.home_sections = self.db["home_sections"]
 
             LOGGER.info("Database connection established")
         
@@ -86,6 +88,7 @@ class Database:
         self.tv_collection = None
         self.movie_collection = None
         self.settings_collection = None
+        self.home_sections = None
 
     @staticmethod
     def _convert_object_id(document: dict) -> dict:
@@ -564,12 +567,24 @@ class Database:
         episode_number: Optional[int] = None,
         title: Optional[str] = None
     ) -> Optional[dict]:
-        query = {"tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]}}
-        if title:
-            query["title"] = title
+        import re
+        possible_ids = []
+        if tmdb_id is not None:
+            possible_ids.append(tmdb_id)
+            try:
+                possible_ids.append(int(tmdb_id))
+            except (ValueError, TypeError):
+                pass
+            possible_ids.append(str(tmdb_id))
+            possible_ids = list(set(possible_ids))
+            query = {"tmdb_id": {"$in": possible_ids}}
+        else:
+            query = {}
 
         if episode_number is not None and season_number is not None:
-            tv_show = await self.tv_collection.find_one(query)
+            tv_show = await self.tv_collection.find_one(query) if query else None
+            if not tv_show and title:
+                tv_show = await self.tv_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
             if not tv_show:
                 return None
             for season in tv_show.get("seasons", []):
@@ -578,7 +593,7 @@ class Database:
                         if episode.get("episode_number") == episode_number:
                             details = self._convert_object_id(episode)
                             details.update({
-                                "tmdb_id": tmdb_id,
+                                "tmdb_id": tv_show.get("tmdb_id", tmdb_id),
                                 "type": "tv",
                                 "season_number": season_number,
                                 "episode_number": episode_number,
@@ -589,14 +604,16 @@ class Database:
             return None
 
         elif season_number is not None:
-            tv_show = await self.tv_collection.find_one(query)
+            tv_show = await self.tv_collection.find_one(query) if query else None
+            if not tv_show and title:
+                tv_show = await self.tv_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
             if not tv_show:
                 return None
             for season in tv_show.get("seasons", []):
                 if season.get("season_number") == season_number:
                     details = self._convert_object_id(season)
                     details.update({
-                        "tmdb_id": tmdb_id,
+                        "tmdb_id": tv_show.get("tmdb_id", tmdb_id),
                         "type": "tv",
                         "season_number": season_number,
                         "media_type": "tv"
@@ -605,14 +622,18 @@ class Database:
             return None
 
         else:
-            tv_doc = await self.tv_collection.find_one(query)
+            tv_doc = await self.tv_collection.find_one(query) if query else None
+            if not tv_doc and title:
+                tv_doc = await self.tv_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
             if tv_doc:
                 tv_doc = self._convert_object_id(tv_doc)
                 tv_doc["type"] = "tv"
                 tv_doc["media_type"] = "tv"
                 return tv_doc
             
-            movie_doc = await self.movie_collection.find_one(query)
+            movie_doc = await self.movie_collection.find_one(query) if query else None
+            if not movie_doc and title:
+                movie_doc = await self.movie_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
             if movie_doc:
                 movie_doc = self._convert_object_id(movie_doc)
                 movie_doc["type"] = "movie"
@@ -1066,3 +1087,159 @@ class Database:
             return True
         admin = await self.db["bot_admins"].find_one({"user_id": user_id})
         return admin is not None
+
+    async def get_home_sections(self) -> List[dict]:
+        """Fetch home sections from DB. Seeds default sections if none exist."""
+        try:
+            sections = await self.home_sections.find({}).sort("position", ASCENDING).to_list(None)
+            if not sections:
+                default_sections = [
+                    {
+                        "title": "Trending Now",
+                        "section_type": "trending",
+                        "media_type": "both",
+                        "layout": "slider",
+                        "limit": 10,
+                        "position": 1,
+                        "enabled": True,
+                        "items": []
+                    },
+                    {
+                        "title": "Latest Anime Series",
+                        "section_type": "latest",
+                        "media_type": "tv",
+                        "layout": "grid",
+                        "limit": 12,
+                        "position": 2,
+                        "enabled": True,
+                        "items": []
+                    },
+                    {
+                        "title": "Latest Movies",
+                        "section_type": "latest",
+                        "media_type": "movie",
+                        "layout": "grid",
+                        "limit": 12,
+                        "position": 3,
+                        "enabled": True,
+                        "items": []
+                    }
+                ]
+                for sec in default_sections:
+                    res = await self.home_sections.insert_one(sec)
+                    sec["_id"] = str(res.inserted_id)
+                return default_sections
+
+            return [self._convert_object_id(sec) for sec in sections]
+        except Exception as e:
+            LOGGER.error(f"Error fetching home sections: {e}")
+            return []
+
+    async def create_home_section(self, data: dict) -> dict:
+        """Create a new home section."""
+        try:
+            count = await self.home_sections.count_documents({})
+            data["position"] = data.get("position", count + 1)
+            res = await self.home_sections.insert_one(data)
+            data["_id"] = str(res.inserted_id)
+            return self._convert_object_id(data)
+        except Exception as e:
+            LOGGER.error(f"Error creating home section: {e}")
+            raise
+
+    async def update_home_section(self, section_id: str, data: dict) -> bool:
+        """Update an existing home section."""
+        try:
+            query = {"_id": ObjectId(section_id)} if ObjectId.is_valid(section_id) else {"_id": section_id}
+            data.pop("_id", None)
+            res = await self.home_sections.update_one(query, {"$set": data})
+            return res.matched_count > 0
+        except Exception as e:
+            LOGGER.error(f"Error updating home section {section_id}: {e}")
+            return False
+
+    async def delete_home_section(self, section_id: str) -> bool:
+        """Delete a home section."""
+        try:
+            query = {"_id": ObjectId(section_id)} if ObjectId.is_valid(section_id) else {"_id": section_id}
+            res = await self.home_sections.delete_one(query)
+            return res.deleted_count > 0
+        except Exception as e:
+            LOGGER.error(f"Error deleting home section {section_id}: {e}")
+            return False
+
+    async def reorder_home_sections(self, section_ids: List[str]) -> bool:
+        """Reorder home sections according to given ID list."""
+        try:
+            for idx, sid in enumerate(section_ids):
+                query = {"_id": ObjectId(sid)} if ObjectId.is_valid(sid) else {"_id": sid}
+                await self.home_sections.update_one(query, {"$set": {"position": idx + 1}})
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error reordering home sections: {e}")
+            return False
+
+    async def get_home_section_items(self, section_id: str) -> List[dict]:
+        """Fetch items for a specific home section."""
+        try:
+            section = None
+            if ObjectId.is_valid(section_id):
+                section = await self.home_sections.find_one({"_id": ObjectId(section_id)})
+            if not section:
+                section = await self.home_sections.find_one({"_id": section_id})
+
+            # Check if section_id is a default alias
+            if not section:
+                if "trending" in section_id:
+                    section = {"section_type": "trending", "media_type": "both", "limit": 10}
+                elif "series" in section_id or "tv" in section_id:
+                    section = {"section_type": "latest", "media_type": "tv", "limit": 12}
+                elif "movie" in section_id:
+                    section = {"section_type": "latest", "media_type": "movie", "limit": 12}
+                else:
+                    return []
+
+            sec_type = section.get("section_type", "latest")
+            media_type = section.get("media_type", "both")
+            limit = int(section.get("limit", 10))
+
+            if sec_type == "top_release":
+                return section.get("items", [])
+
+            if sec_type == "trending":
+                data = await self.get_trending_media(page=1, page_size=limit)
+                items = data.get("results", [])
+                if media_type == "movie":
+                    items = [it for it in items if it.get("media_type") == "movie"]
+                elif media_type == "tv":
+                    items = [it for it in items if it.get("media_type") == "tv"]
+                return items
+
+            # Default: latest
+            if media_type == "tv":
+                res = await self.sort_tv_shows([("updated_on", "desc")], page=1, page_size=limit)
+                raw_items = res.get("tv_shows", [])
+                items = []
+                for x in raw_items:
+                    item_dict = x.dict() if hasattr(x, "dict") else (x.model_dump() if hasattr(x, "model_dump") else dict(x))
+                    item_dict = self._convert_object_id(item_dict)
+                    item_dict["media_type"] = "tv"
+                    items.append(item_dict)
+                return items
+            elif media_type == "movie":
+                res = await self.sort_movies([("updated_on", "desc")], page=1, page_size=limit)
+                raw_items = res.get("movies", [])
+                items = []
+                for x in raw_items:
+                    item_dict = x.dict() if hasattr(x, "dict") else (x.model_dump() if hasattr(x, "model_dump") else dict(x))
+                    item_dict = self._convert_object_id(item_dict)
+                    item_dict["media_type"] = "movie"
+                    items.append(item_dict)
+                return items
+            else:
+                # both
+                data = await self.get_trending_media(page=1, page_size=limit)
+                return data.get("results", [])
+        except Exception as e:
+            LOGGER.error(f"Error fetching items for section {section_id}: {e}")
+            return []

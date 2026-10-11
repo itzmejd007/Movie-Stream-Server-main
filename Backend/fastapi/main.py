@@ -251,6 +251,66 @@ async def admin_sync_manual_files():
                 LOGGER.error(f"Sync error for chat {cid}: {e}")
 
     return {"message": f"Sync complete. Removed {deleted_count} stale files."}
+ 
+# --- Home Sections Endpoints ---
+@app.get("/api/home-sections")
+async def get_home_sections_endpoint():
+    try:
+        sections = await db.get_home_sections()
+        return sections
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/home-sections")
+async def create_home_section_endpoint(request: Request):
+    try:
+        data = await request.json()
+        new_sec = await db.create_home_section(data)
+        return new_sec
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.put("/api/home-sections/{section_id}")
+async def update_home_section_endpoint(section_id: str, request: Request):
+    try:
+        data = await request.json()
+        success = await db.update_home_section(section_id, data)
+        if success:
+            return {"message": "Section updated"}
+        raise HTTPException(status_code=404, detail="Section not found")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/home-sections/{section_id}")
+async def delete_home_section_endpoint(section_id: str):
+    try:
+        success = await db.delete_home_section(section_id)
+        if success:
+            return {"message": "Section deleted"}
+        raise HTTPException(status_code=404, detail="Section not found")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/home-sections/reorder")
+async def reorder_home_sections_endpoint(request: Request):
+    try:
+        body = await request.json()
+        section_ids = body.get("section_ids", [])
+        success = await db.reorder_home_sections(section_ids)
+        if success:
+            return {"message": "Order updated"}
+        raise HTTPException(status_code=400, detail="Failed to reorder")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/home-sections/{section_id}/items")
+async def get_home_section_items_endpoint(section_id: str):
+    try:
+        items = await db.get_home_section_items(section_id)
+        return {"items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 #Homepage:------
 # hero = http://localhost:8000/api/tvshows?sort_by=rating:desc&sort_by=release_year:desc&page=1&page_size=10
