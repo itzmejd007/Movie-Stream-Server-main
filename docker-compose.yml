@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  movie-stream-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: movie-stream-server
+    restart: unless-stopped
+    ports:
+      # Maps external port to container port (default 8000 or custom PORT from config.env)
+      - "${PORT:-8000}:${PORT:-8000}"
+    env_file:
+      - config.env
+    volumes:
+      - ./config.env:/app/config.env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

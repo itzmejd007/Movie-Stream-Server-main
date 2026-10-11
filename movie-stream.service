@@ -1,0 +1,19 @@
+[Unit]
+Description=Movie Stream Backend FastAPI and Telegram Bot Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+# Adjust WorkingDirectory and ExecStart to your actual VPS path if different
+WorkingDirectory=/var/www/Movie-Stream-Server-main-main
+ExecStart=/var/www/Movie-Stream-Server-main-main/venv/bin/python3 -m Backend
+Restart=always
+RestartSec=5
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/var/www/Movie-Stream-Server-main-main/config.env
+
+[Install]
+WantedBy=multi-user.target

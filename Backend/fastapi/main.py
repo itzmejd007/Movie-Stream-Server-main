@@ -49,6 +49,17 @@ app.add_middleware(
 async def ping():
     return {"ping": "pong", "version": __version__, "db": str(db.db_name)}
 
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "Movie-Stream-Server",
+        "version": __version__,
+        "uptime": get_readable_time(time() - StartTime),
+        "db": str(getattr(db, "db_name", "connected"))
+    }
+
 @app.get("/", response_model=Dict[str, Any])
 async def get_bot_workloads():
     """
@@ -101,9 +112,9 @@ async def watch(
     """
 
     return templates.TemplateResponse(
-        "index.html", 
-        {
-            "request": request, 
+        request=request,
+        name="index.html",
+        context={
             "id": tmdb_id, 
             "season": season_number, 
             "episode": episode_number
@@ -344,6 +355,10 @@ async def stream_handler(request: Request, id: str, name: str):
         raise HTTPException(status_code=400, detail="Missing id or hash")
     chat_id = f"-100{decoded_data['chat_id']}"
     return await media_streamer(request, int(chat_id), int(decoded_data['msg_id']), decoded_data['hash'])
+
+@app.get('/dl/{id}/{name}')
+async def dl_handler(request: Request, id: str, name: str):
+    return await stream_handler(request, id, name)
 
 
 

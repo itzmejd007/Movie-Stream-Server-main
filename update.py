@@ -41,8 +41,13 @@ if UPSTREAM_REPO:
     git_dir = ".git"
     
     if ospath.exists(git_dir):
-        srun(["rm", "-rf", git_dir])
-        log_info("Removed existing .git directory.")
+        import shutil
+        try:
+            shutil.rmtree(git_dir)
+            log_info("Removed existing .git directory.")
+        except Exception:
+            srun(["rm", "-rf", git_dir], shell=True)
+            log_info("Removed existing .git directory via shell.")
     else:
         log_info(".git directory not found, proceeding with initialization.")
 

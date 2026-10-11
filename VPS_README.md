@@ -1,246 +1,167 @@
+# 🚀 Movie Stream Backend - Production VPS Deployment Guide
 
-# 🚀 PRODUCTION VPS / AWS DEPLOYMENT GUIDE
-
-(For FastAPI + Domain + SSL + Cloudflare optional)
-
----
-
-# 📦 1. Server Requirements
-
-* Ubuntu 22.04 LTS
-* Python 3.10+
-* 1 GB RAM minimum
-* Ports: 22, 80, 443 open
+This guide explains how to easily deploy the **Movie-Stream-Server** backend on any Linux VPS (Ubuntu 22.04 / 24.04, Debian 11/12) and connect it with your Vercel-hosted frontend.
 
 ---
 
-# 🛠 2. Initial Server Setup
+## 📋 Prerequisites
+- A VPS with Ubuntu 20.04/22.04/24.04 or Debian (Recommended: 1GB+ RAM, e.g. DigitalOcean, Hetzner, AWS EC2, Contabo, Linode)
+- Open Ports: `22` (SSH), `80` (HTTP), `443` (HTTPS)
+- Your domain or subdomain (e.g., `api.yourdomain.com`) pointing to your VPS IP address in DNS (A Record).
 
-### Update system
+---
 
+## ⚡ Option 1: Docker Compose (Recommended - Quickest & Isolated)
+
+If you have Docker & Docker Compose installed on your VPS, this is the easiest method.
+
+### 1. Clone repository to VPS
+```bash
+git clone <your-repo-url> /opt/movie-stream
+cd /opt/movie-stream
+```
+
+### 2. Configure credentials
+Ensure your `config.env` exists with your Telegram and MongoDB credentials:
+```bash
+nano config.env
+```
+
+### 3. Start the container in background
+```bash
+docker compose up -d --build
+```
+
+### 4. Useful Docker Commands
+```bash
+# View real-time logs
+docker compose logs -f
+
+# Check container status
+docker compose ps
+
+# Restart backend
+docker compose restart
+
+# Stop backend
+docker compose down
+```
+
+---
+
+## 🛠 Option 2: Automated 1-Script VPS Deployment
+
+We have created an automated setup script `deploy_vps.sh` that installs all system packages (Python, venv, ffmpeg, git), sets up the virtual environment, installs dependencies, and configures an auto-restarting `systemd` service.
+
+### 1. Run the script on your VPS
+```bash
+cd /path/to/Movie-Stream-Server-main-main
+chmod +x deploy_vps.sh
+sudo bash deploy_vps.sh
+```
+
+The script will automatically configure `movie-stream.service` and start the server!
+
+### Useful Systemd Commands:
+```bash
+# View live logs
+journalctl -u movie-stream.service -f
+
+# Restart service
+sudo systemctl restart movie-stream.service
+
+# Stop service
+sudo systemctl stop movie-stream.service
+
+# Check status
+sudo systemctl status movie-stream.service
+```
+
+---
+
+## 📦 Option 3: Manual Systemd Setup (Native Python)
+
+If you prefer setting up manually without Docker:
+
+### 1. Install system dependencies
 ```bash
 sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3 python3-venv python3-pip git ffmpeg curl
 ```
 
-### Install required tools
-
+### 2. Setup Virtual Environment & Install Requirements
 ```bash
-sudo apt install python3 python3-venv python3-pip git -y
-```
-
----
-
-# 📁 3. Deploy Your App (VPS / AWS)
-
-Clone your project:
-
-```bash
-git clone https://github.com/yourrepo.git
-cd yourrepo
-```
-
-Create virtual environment:
-
-```bash
+cd /var/www/Movie-Stream-Server-main-main
 python3 -m venv venv
 source venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 
----
-
-# 🌐 4. Domain Setup (VPS / AWS)
-
-In your DNS (Hostinger / etc.):
-
-Create:
-
-| Type | Name | Value          |
-| ---- | ---- | -------------- |
-| A    | api  | YOUR_SERVER_IP |
-
-TTL: `300`
-
----
-
-# 🔐 5. Install Caddy (Best Reverse Proxy + Auto SSL)
-
-Install:
-
+### 3. Test running directly
 ```bash
+python3 -m Backend
+```
+Press `Ctrl+C` once verified.
+
+### 4. Enable Background Service
+Copy the provided unit file:
+```bash
+sudo cp movie-stream.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable movie-stream.service
+sudo systemctl start movie-stream.service
+```
+
+---
+
+## 🌐 Setting Up Domain & Free SSL (Caddy Reverse Proxy)
+
+Caddy is the simplest web server with **automatic SSL certificate issuance and renewals**.
+
+### 1. Install Caddy
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
 sudo apt install caddy -y
 ```
 
-Edit config:
-
+### 2. Configure Caddyfile
 ```bash
 sudo nano /etc/caddy/Caddyfile
 ```
-
 Add:
-
-```
+```caddy
 api.yourdomain.com {
     reverse_proxy localhost:8000
 }
 ```
+*(Replace `api.yourdomain.com` with your actual subdomain pointing to this VPS IP, and `8000` with your `PORT` if different).*
 
-Restart:
-
+### 3. Restart Caddy
 ```bash
 sudo systemctl restart caddy
 ```
-
-Check:
-
-```bash
-sudo systemctl status caddy
-```
+Caddy will automatically generate a free HTTPS SSL certificate from Let's Encrypt!
 
 ---
 
-# 🏗 6. Run/Stop FastAPI in Production
+## 🔗 Connecting Frontend on Vercel
 
-To Run:
-
-```bash
-nohup python -m Backend
-
-```
-
-To Stop:
-
-```bash
-sudo pkill -f python
-# or
-ps -ef | grep python # Now kill the process using PID
-kill <PID> # eg: kill 64182
-```
+In your Vercel Dashboard for the frontend (`Client-main`):
+1. Navigate to **Project Settings** → **Environment Variables**.
+2. Set or update `VITE_BASE_URL`:
+   ```env
+   VITE_BASE_URL=https://api.yourdomain.com
+   ```
+3. Click **Redeploy** on Vercel.
 
 ---
 
+## 🛡 Automatic Maintenance Mode Behavior
 
-# 🌍 7. AWS Specific Steps
-
-## Open Security Group Ports
-
-Go to:
-
-```
-EC2 → Security Groups
-```
-
-Add inbound rules:
-
-| Port | Type  |
-| ---- | ----- |
-| 22   | SSH   |
-| 80   | HTTP  |
-| 443  | HTTPS |
-
----
-
-# ☁ 8. If Using Cloudflare
-
-DNS → Orange Cloud (Proxied)
-
-SSL Mode → **Full**
-
-Never use Flexible once Caddy is installed.
-
----
-
-# 🧠 Final Architecture
-
-```
-User
-  ↓
-Cloudflare (optional)
-  ↓
-Caddy (SSL + Reverse Proxy)
-  ↓
-Gunicorn (8000)
-  ↓
-FastAPI App
-```
-
----
-
-# 📊 Monitoring Commands
-
-Check FastAPI:
-
-```bash
-sudo systemctl status fastapi
-```
-
-Check Caddy:
-
-```bash
-sudo systemctl status caddy
-```
-
-Check logs:
-
-```bash
-journalctl -u fastapi -f
-journalctl -u caddy -f
-```
-
----
-
-# 🛡 Production Improvements (Recommended) (Optional)
-
-### Enable Firewall
-
-```bash
-sudo ufw allow 22
-sudo ufw allow 80
-sudo ufw allow 443
-sudo ufw enable
-```
-
----
-
-### Enable Swap (For 1GB servers) (Optional)
-
-```bash
-sudo fallocate -l 1G /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-```
-
----
-
-# 🔥 Common Errors & Fixes
-
-| Error                        | Cause                | Fix                     |
-| ---------------------------- | -------------------- | ----------------------- |
-| 522                          | Port 80 blocked      | Open security group     |
-| SSL loop                     | Cloudflare Flexible  | Change to Full          |
-| Port 80 in use               | nginx/apache running | Stop them               |
-| SSL_ERROR_RX_RECORD_TOO_LONG | Using https on 8000  | Use domain without port |
-
----
-
-# 🎯 Final Result
-
-Your site runs on:
-
-```
-https://api.yourdomain.com
-```
-
-* Auto HTTPS
-* Auto restart
-* Production ready
-* No manual SSL renewals
-
----
-
+Your frontend now includes automatic backend health detection:
+- **Server Online:** The frontend functions normally without interruption.
+- **Server Offline / Maintenance:** If the VPS server is restarting, undergoing updates, or unreachable, the frontend automatically displays a clean **Under Maintenance** screen with an auto-reconnect timer and "Retry Now" button.
+- As soon as the VPS backend is back online, the frontend automatically reconnects seamlessly!
