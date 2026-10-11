@@ -76,7 +76,10 @@ class Database:
     async def disconnect(self):
         """Close the database connection."""
         if self._conn is not None:
-            await self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:
+                pass
             LOGGER.info("Database connection closed")
         self._conn = None
         self.db = None

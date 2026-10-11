@@ -290,7 +290,7 @@ async def get_media_details(
 @app.get("/api/similar/")
 async def get_similar_media(
     tmdb_id: int,
-    media_type: str = Query(..., regex="^(movie|tvshow)$"),
+    media_type: str = Query(..., pattern="^(movie|tvshow)$"),
     page: int = Query(default=1, ge=1, description="Page number to return"),
     page_size: int = Query(default=10, ge=1, description="Number of similar media per page")
 ):
@@ -466,8 +466,8 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
 @app.get("/api/admin/external/search")
 async def admin_external_search(
     query: str = Query(...),
-    media_type: str = Query(..., regex="^(movie|tv)$"),
-    source: str = Query("tmdb", regex="^(tmdb|imdb)$")
+    media_type: str = Query(..., pattern="^(movie|tv)$"),
+    source: str = Query("tmdb", pattern="^(tmdb|imdb)$")
 ):
     if source == "tmdb":
         return await search_tmdb(query, media_type)
@@ -477,8 +477,8 @@ async def admin_external_search(
 @app.get("/api/admin/external/details")
 async def admin_external_details(
     id: str = Query(...),
-    media_type: str = Query(..., regex="^(movie|tv)$"),
-    source: str = Query("tmdb", regex="^(tmdb|imdb)$")
+    media_type: str = Query(..., pattern="^(movie|tv)$"),
+    source: str = Query("tmdb", pattern="^(tmdb|imdb)$")
 ):
     details = await get_external_details(id, media_type, source)
     if not details:
