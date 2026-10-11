@@ -3,14 +3,19 @@
 # Movie Stream Backend - Stop Script
 # =========================================================
 
-echo "Stopping Movie Stream Server and freeing port 8000..."
-fuser -k 8000/tcp 2>/dev/null || true
-pkill -f "python3 -m Backend" 2>/dev/null || true
-pkill -f "python -m Backend" 2>/dev/null || true
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$DIR"
+
+PORT=$(grep -E "^PORT" config.env 2>/dev/null | cut -d '=' -f2 | tr -d ' "' | tr -d "'" || echo "8000")
+PORT=${PORT:-8000}
+
+echo "Stopping Movie Stream Server and freeing port $PORT..."
+systemctl stop movie-stream 2>/dev/null || true
+fuser -k -9 "${PORT}/tcp" 2>/dev/null || true
+fuser -k -9 "8000/tcp" 2>/dev/null || true
+fuser -k -9 "7860/tcp" 2>/dev/null || true
+pkill -9 -f "python3 -m Backend" 2>/dev/null || true
+pkill -9 -f "python -m Backend" 2>/dev/null || true
 sleep 1
 
-if pgrep -f "Backend" > /dev/null; then
-    pkill -9 -f "Backend" 2>/dev/null || true
-fi
-
-echo "✓ Backend stopped and Port 8000 freed successfully!"
+echo "✓ Backend stopped and Ports ($PORT, 8000, 7860) freed successfully!"
