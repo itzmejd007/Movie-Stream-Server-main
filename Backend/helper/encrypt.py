@@ -59,7 +59,38 @@ async def encode_string(data):
     return await async_base62_encode(compressed_data)
 
 # Asynchronous function to decode a string
-async def decode_string(encoded_data):
-    compressed_data = await async_base62_decode(encoded_data)
-    json_data = await async_decompress_data(compressed_data)
-    return json.loads(json_data)
+async def decode_string(encoded_data: str) -> dict:
+    if not encoded_data:
+        return {"chat_id": None, "msg_id": None, "hash": None}
+
+    # Format 1: Base64 formatted string (e.g. "chat_id:msg_id:hash")
+    try:
+        padded = encoded_data + '=' * (-len(encoded_data) % 4)
+        raw_bytes = base64.urlsafe_b64decode(padded.encode('ascii'))
+        raw_text = raw_bytes.decode('utf-8', errors='ignore')
+        parts = raw_text.split(':')
+        if len(parts) >= 3 and parts[1].isdigit():
+            return {
+                "chat_id": int(parts[0]) if parts[0].lstrip('-').isdigit() else parts[0],
+                "msg_id": int(parts[1]),
+                "hash": parts[2].strip()
+            }
+        # Check if it's JSON in base64
+        if raw_text.strip().startswith('{'):
+            data = json.loads(raw_text)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+
+    # Format 2: Base62 + zlib compressed JSON
+    try:
+        compressed_data = await async_base62_decode(encoded_data)
+        json_data = await async_decompress_data(compressed_data)
+        data = json.loads(json_data)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    return {"chat_id": None, "msg_id": None, "hash": None}

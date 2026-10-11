@@ -402,19 +402,21 @@ async def search_documents_endpoint(
 @app.get('/download/{id}/{name}')
 async def download_handler(request: Request, id: str, name: str):
     decoded_data = await decode_string(id)
-    if not decoded_data['msg_id'] or not decoded_data['hash']:
+    if not decoded_data.get('msg_id') or not decoded_data.get('hash'):
         raise HTTPException(status_code=400, detail="Missing id or hash")
-    chat_id = f"-100{decoded_data['chat_id']}"
-    return await media_streamer(request, int(chat_id), int(decoded_data['msg_id']), decoded_data['hash'], download=True)
+    raw_cid = str(decoded_data['chat_id'])
+    chat_id = int(raw_cid) if raw_cid.startswith("-") else int(f"-100{raw_cid}")
+    return await media_streamer(request, chat_id, int(decoded_data['msg_id']), decoded_data['hash'], download=True)
 
 
 @app.get('/stream/{id}/{name}')
 async def stream_handler(request: Request, id: str, name: str):
     decoded_data = await decode_string(id)
-    if not decoded_data['msg_id'] or not decoded_data['hash']:
+    if not decoded_data.get('msg_id') or not decoded_data.get('hash'):
         raise HTTPException(status_code=400, detail="Missing id or hash")
-    chat_id = f"-100{decoded_data['chat_id']}"
-    return await media_streamer(request, int(chat_id), int(decoded_data['msg_id']), decoded_data['hash'])
+    raw_cid = str(decoded_data['chat_id'])
+    chat_id = int(raw_cid) if raw_cid.startswith("-") else int(f"-100{raw_cid}")
+    return await media_streamer(request, chat_id, int(decoded_data['msg_id']), decoded_data['hash'])
 
 @app.get('/dl/{id}/{name}')
 async def dl_handler(request: Request, id: str, name: str):
