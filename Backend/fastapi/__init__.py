@@ -11,6 +11,8 @@ config = uvicorn.Config(
     host='0.0.0.0',
     port=Port,
     proxy_headers=True,
-    forwarded_allow_ips='*'
+    forwarded_allow_ips='*',
+    timeout_keep_alive=60,
+    timeout_graceful_shutdown=30
 )
 server = uvicorn.Server(config)

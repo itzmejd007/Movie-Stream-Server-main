@@ -1,8 +1,12 @@
+from os import getenv
 from time import time
 from typing import Any, Dict, List, Optional, Union
 from Backend.helper.encrypt import decode_string
 from fastapi import FastAPI, Query, Request, HTTPException
 from pydantic import ValidationError
+from passlib.context import CryptContext
+
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 from fastapi.responses import StreamingResponse, HTMLResponse
 import urllib.parse
@@ -457,9 +461,8 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
             status_code=416,
             headers={"Content-Range": f"bytes */{file_size}"},
         )
- #   chunk_size = 1024 * 1024
- #   chunk_size = 2 * 1024 * 1024  # 2MB
-    chunk_size = 512 * 1024  # 512KB (Best for smooth start)
+    # 1MB chunk size ensures highest speed & throughput on Telegram MTProto
+    chunk_size = 1024 * 1024
     until_bytes = min(until_bytes, file_size - 1)
 
     offset = from_bytes - (from_bytes % chunk_size)
@@ -467,11 +470,10 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
     last_part_cut = until_bytes % chunk_size + 1
 
     req_length = until_bytes - from_bytes + 1
-  #  part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
     part_count = math.ceil((until_bytes - offset + 1) / chunk_size)
     body = tg_connect.yield_file(
-    file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
-)
+        file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size, chat_id=chat_id, message_id=msg_id
+    )
     mime_type = file_id.mime_type
     file_name = file_id.file_name
     disposition = "inline"
@@ -523,7 +525,67 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
         headers=headers,
         )
 
-# --- Admin Management Endpoints ---
+# --- Admin Authentication & Management Endpoints ---
+
+@app.post("/api/admin/login")
+async def admin_login(payload: Dict[str, Any]):
+    username = (payload.get("username") or "").strip()
+    password = (payload.get("password") or "").strip()
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+
+    admin_doc = None
+    if db.db is not None:
+        try:
+            admin_doc = await db.db["admin_credentials"].find_one({"username": username})
+            if not admin_doc:
+                active_doc = await db.db["admin_credentials"].find_one({"_id": "active_admin"})
+                if active_doc and active_doc.get("username") == username:
+                    admin_doc = active_doc
+        except Exception as e:
+            LOGGER.error(f"Error checking admin_credentials: {e}")
+
+    if not admin_doc and db.db is not None:
+        try:
+            admin_doc = await db.db["auth_users"].find_one({"username": username})
+        except Exception as e:
+            LOGGER.error(f"Error checking auth_users: {e}")
+
+    is_valid = False
+    if admin_doc:
+        hashed_pass = admin_doc.get("password")
+        plain_pass = admin_doc.get("plain_password")
+
+        if hashed_pass:
+            try:
+                if pwd_ctx.verify(password, hashed_pass):
+                    is_valid = True
+            except Exception:
+                pass
+
+        if not is_valid and (password == hashed_pass or password == plain_pass):
+            is_valid = True
+    else:
+        env_user = getenv("ADMIN_USER") or getenv("VITE_ADMIN_USER") or "admin"
+        env_pass = getenv("ADMIN_PASS") or getenv("VITE_ADMIN_PASS") or "admin123"
+        if username == env_user and password == env_pass:
+            is_valid = True
+
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = secrets.token_hex(32)
+    return {
+        "status": "success",
+        "token": token,
+        "username": username,
+        "message": "Login successful"
+    }
+
+@app.get("/api/admin/verify")
+async def admin_verify():
+    return {"status": "authenticated"}
 
 @app.get("/api/admin/external/search")
 async def admin_external_search(

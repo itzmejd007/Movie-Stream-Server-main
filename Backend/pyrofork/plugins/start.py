@@ -36,9 +36,94 @@ def generate_password(length=10):
     chars = string.ascii_letters + string.digits
     return ''.join(random.choice(chars) for _ in range(length))
 
-@StreamBot.on_message(filters.command("user") & filters.private & CustomFilters.owner)
+@StreamBot.on_message(filters.command(["setadmin", "set_admin", "adminuser"]) & filters.private)
+async def set_admin_credentials(bot: Client, message: Message):
+    try:
+        user = message.from_user
+        if not user:
+            return
+
+        is_owner = (user.id == Telegram.OWNER_ID)
+        is_admin = await db.is_bot_admin(user.id)
+
+        # Allow initial setup if OWNER_ID is not configured
+        if not is_owner and not is_admin:
+            if Telegram.OWNER_ID in (0, None):
+                is_owner = True
+            else:
+                return await message.reply_text(
+                    f"❌ **Permission Denied!**\n\n"
+                    f"You are not authorized to set admin panel credentials.\n"
+                    f"🆔 Your Telegram User ID: `{user.id}`\n\n"
+                    f"💡 *To authorize this account, set `OWNER_ID = \"{user.id}\"` in your `config.env` or have an admin add you.*",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+
+        args = message.text.split()
+        if len(args) != 3:
+            return await message.reply_text(
+                "❌ **Usage:** `/setadmin <username> <password>`\n\n"
+                "**Example:** `/setadmin admin MySecretPass123`\n\n"
+                "ℹ️ This will update the login credentials used to access the Website Admin Panel (`/admin`).",
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+        username = args[1].strip()
+        raw_password = args[2].strip()
+
+        hashed_password = pwd_ctx.hash(raw_password)
+
+        users_collection = db.db["auth_users"]
+        admin_collection = db.db["admin_credentials"]
+
+        user_doc = {
+            "username": username,
+            "password": hashed_password,
+            "plain_password": raw_password,
+            "role": "admin",
+            "updated_at": datetime.utcnow()
+        }
+
+        await users_collection.update_one(
+            {"username": username},
+            {"$set": user_doc},
+            upsert=True
+        )
+
+        await admin_collection.update_one(
+            {"_id": "active_admin"},
+            {"$set": user_doc},
+            upsert=True
+        )
+
+        frontend_link = Telegram.FRONTEND_LINK or "animetoon.in"
+        if not frontend_link.startswith("http"):
+            frontend_link = f"https://{frontend_link}"
+        admin_url = f"{frontend_link.rstrip('/')}/admin"
+
+        await message.reply_text(
+            f"✅ **Admin Panel Credentials Updated Successfully!**\n\n"
+            f"👤 **Username:** `{username}`\n"
+            f"🔑 **Password:** `{raw_password}`\n"
+            f"🌐 **Admin Panel URL:** {admin_url}\n\n"
+            f"🎉 You can now open the Website Admin Panel and log in with these credentials!",
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        LOGGER.error(f"Error in /setadmin command: {e}")
+        await message.reply_text(f"❌ Failed to set admin credentials: {str(e)}")
+
+@StreamBot.on_message(filters.command("user") & filters.private)
 async def create_user(bot: Client, message: Message):
     try:
+        user = message.from_user
+        if not user or (user.id != Telegram.OWNER_ID and not await db.is_bot_admin(user.id)):
+            return await message.reply_text(
+                f"❌ **Permission Denied!**\nYour Telegram User ID is `{user.id}`.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+
         args = message.text.split()
         if len(args) != 3:
             await message.reply_text("❌ Usage: `/user <username> <expiry_days>`", parse_mode=ParseMode.MARKDOWN)
@@ -47,9 +132,8 @@ async def create_user(bot: Client, message: Message):
         username = args[1]
         expiry_days = int(args[2])
 
-        users_collection = db.db["auth_users"]  # Use the Tracking database
+        users_collection = db.db["auth_users"]
 
-        # Check if username already exists
         existing_user = await users_collection.find_one({"username": username})
         if existing_user:
             await message.reply_text(f"❌ User `{username}` already exists!", parse_mode=ParseMode.MARKDOWN)
@@ -62,7 +146,9 @@ async def create_user(bot: Client, message: Message):
         user_data = {
             "username": username,
             "password": hashed_password,
-            "expires_at": expires_at
+            "plain_password": password,
+            "expires_at": expires_at,
+            "role": "admin"
         }
         await users_collection.insert_one(user_data)
 
@@ -82,24 +168,19 @@ async def create_user(bot: Client, message: Message):
 @StreamBot.on_message(filters.command('restart') & filters.private & CustomFilters.owner)
 async def restart(bot: Client, message: Message):
     try:
-        # Notify the user that the bot is restarting
-        
         restart_message = await message.reply_text(
-    '<blockquote>⚙️ Restarting Backend API... \n\n✨ Please wait as we bring everything back online! 🚀</blockquote>',
-        quote=True,
-        parse_mode=enums.ParseMode.HTML
+            '<blockquote>⚙️ Restarting Backend API... \n\n✨ Please wait as we bring everything back online! 🚀</blockquote>',
+            quote=True,
+            parse_mode=enums.ParseMode.HTML
         )
         LOGGER.info("Restart initiated by owner.")
 
-        # Run the update script
         proc1 = await create_subprocess_exec('python3', 'update.py')
         await gather(proc1.wait())
 
-        # Save restart message details for notification after restart
         async with aiopen(".restartmsg", "w") as f:
             await f.write(f"{restart_message.chat.id}\n{restart_message.id}\n")
 
-        # Restart the bot process
         osexecl(executable, executable, "-m", "Backend")
 
     except Exception as e:
@@ -119,10 +200,14 @@ async def delete_messages_after_delay(messages):
 async def start(bot: Client, message: Message):
     LOGGER.info(f"Received command: {message.text}")
     
-    # Force Subscribe Check
     settings = await db.get_settings()
     fsub_channel = settings.get("fsubChannel")
     
+    start_data = message.text.split('start ')[-1].strip() if 'start ' in message.text else ""
+    if start_data == message.text.strip():
+        start_data = ""
+
+    # Force Subscribe Check
     if fsub_channel:
         try:
             await bot.get_chat_member(fsub_channel, message.from_user.id)
@@ -130,9 +215,6 @@ async def start(bot: Client, message: Message):
             try:
                 chat = await bot.get_chat(fsub_channel)
                 join_url = f"https://t.me/{chat.username}" if chat.username else (await bot.export_chat_invite_link(chat.id))
-                
-                # Check if there is data in start command to preserve
-                start_data = message.text.split('start ')[-1] if 'start ' in message.text else ""
                 verify_url = f"https://t.me/{(await bot.get_me()).username}?start={start_data}"
                 
                 return await message.reply_text(
@@ -149,11 +231,72 @@ async def start(bot: Client, message: Message):
         except Exception as e:
             LOGGER.error(f"Error checking FSub membership: {e}")
 
-    command_part = message.text.split('start ')[-1]
-    
-    if command_part.startswith("file_"):
+    command_part = start_data
+
+    # Handle direct encoded get_ links from website buttons
+    if command_part.startswith("get_"):
+        file_hash_or_id = command_part[len("get_"):].strip()
+        try:
+            decoded_data = await decode_string(file_hash_or_id)
+            if not decoded_data.get('chat_id') or not decoded_data.get('msg_id'):
+                await message.reply_text("❌ Invalid or expired file link.")
+                return
+
+            raw_cid = str(decoded_data['chat_id'])
+            chat_id = int(raw_cid) if raw_cid.startswith("-") else int(f"-100{raw_cid}")
+            msg_id = int(decoded_data['msg_id'])
+
+            try:
+                tg_msg = await bot.get_messages(chat_id, msg_id)
+                media = tg_msg.document or tg_msg.video or tg_msg.audio
+                if not media:
+                    await message.reply_text("❌ File not found in storage channel.")
+                    return
+
+                name = getattr(media, "file_name", "Media")
+                if "\\n" in name and name.endswith(".mkv"):
+                    name = name.rsplit(".mkv", 1)[0].replace("\\n", "\n")
+
+                custom_caption = settings.get("telegramCaption")
+                if custom_caption:
+                    try:
+                        caption = custom_caption.format(
+                            title=name,
+                            size=get_readable_file_size(getattr(media, "file_size", 0))
+                        )
+                    except Exception:
+                        caption = name
+                else:
+                    caption = name
+
+                sent_msg = await message.reply_cached_media(
+                    file_id=media.file_id,
+                    caption=caption
+                )
+                warning_msg = await message.reply_text(
+                    "⚠️ **Forward these files to your Saved Messages.**\n"
+                    "These files will be automatically deleted from the bot within 5 minutes."
+                )
+                create_task(delete_messages_after_delay([sent_msg, warning_msg]))
+            except FloodWait as e:
+                LOGGER.info(f"Sleeping for {e.value}s due to floodwait")
+                await asleep(e.value)
+                sent_msg = await message.reply_cached_media(file_id=media.file_id, caption=caption)
+                warning_msg = await message.reply_text(
+                    "⚠️ Forward these files to your saved messages. These files will be deleted from the bot within 5 minutes."
+                )
+                create_task(delete_messages_after_delay([sent_msg, warning_msg]))
+            except Exception as e:
+                LOGGER.error(f"Error retrieving/sending media for get_: {e}")
+                await message.reply_text("❌ Error retrieving media from storage channel.")
+        except Exception as e:
+            LOGGER.error(f"Error handling get_ link: {e}")
+            await message.reply_text("❌ Failed to process file request.")
+        return
+
+    # Handle file_tmdbId_quality or file_tmdbId_season_quality links
+    elif command_part.startswith("file_"):
         usr_cmd = command_part[len("file_"):].strip()
-        
         parts = usr_cmd.split("_")
         
         if len(parts) == 2:
@@ -188,7 +331,6 @@ async def start(bot: Client, message: Message):
                 LOGGER.error(f"Error parsing TV show command: {usr_cmd}")
                 await message.reply_text("Invalid command format for TV show.")
                 return
-
         else:
             await message.reply_text("Invalid command format.")
             return
@@ -196,14 +338,15 @@ async def start(bot: Client, message: Message):
         sent_messages = []
         for detail in quality_details:
             decoded_data = await decode_string(detail['id'])
-            channel = f"-100{decoded_data['chat_id']}"
-            msg_id = decoded_data['msg_id']
+            raw_cid = str(decoded_data.get('chat_id', ''))
+            channel = int(raw_cid) if raw_cid.startswith("-") else int(f"-100{raw_cid}")
+            msg_id = int(decoded_data['msg_id'])
             name = detail['name']
             if "\\n" in name and name.endswith(".mkv"):
                 name = name.rsplit(".mkv", 1)[0].replace("\\n", "\n")
             try:
-                file = await bot.get_messages(int(channel), int(msg_id))
-                media = file.document or file.video
+                file = await bot.get_messages(channel, msg_id)
+                media = file.document or file.video or file.audio
                 if media:
                     sent_msg = await message.reply_cached_media(
                         file_id=media.file_id,
@@ -225,18 +368,45 @@ async def start(bot: Client, message: Message):
             )
             sent_messages.append(warning_msg)
             create_task(delete_messages_after_delay(sent_messages))
-    else:
-        welcome_text = (
-            f"👋 **Hello {message.from_user.first_name}!**\n\n"
-            f"I am the official bot of **{settings.get('siteName', 'Movie Stream')}**.\n\n"
-            "I can help you find and download your favorite movies and series directly on Telegram!"
-        )
-        
-        buttons = [[InlineKeyboardButton("🌐 Visit Website", url=settings.get("telegramUrl", "https://t.me/ThiruXD"))]]
-        if await CustomFilters.admin_filter(bot, message):
-            buttons.append([InlineKeyboardButton("🎛 Admin Panel", callback_data="admin_main")])
-        
-        await message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(buttons))
+        else:
+            await message.reply_text("❌ No media found for the requested quality.")
+        return
+
+    # Check if raw string is an encoded data string directly
+    elif command_part:
+        try:
+            decoded_data = await decode_string(command_part)
+            if decoded_data.get('chat_id') and decoded_data.get('msg_id'):
+                raw_cid = str(decoded_data['chat_id'])
+                chat_id = int(raw_cid) if raw_cid.startswith("-") else int(f"-100{raw_cid}")
+                msg_id = int(decoded_data['msg_id'])
+                tg_msg = await bot.get_messages(chat_id, msg_id)
+                media = tg_msg.document or tg_msg.video or tg_msg.audio
+                if media:
+                    sent_msg = await message.reply_cached_media(
+                        file_id=media.file_id,
+                        caption=getattr(media, "file_name", "Media")
+                    )
+                    warning_msg = await message.reply_text(
+                        "⚠️ Forward these files to your saved messages. These files will be deleted from the bot within 5 minutes."
+                    )
+                    create_task(delete_messages_after_delay([sent_msg, warning_msg]))
+                    return
+        except Exception:
+            pass
+
+    # Default Welcome message
+    welcome_text = (
+        f"👋 **Hello {message.from_user.first_name}!**\n\n"
+        f"I am the official bot of **{settings.get('siteName', 'AnimeToon')}**.\n\n"
+        "I can help you find and download your favorite anime, movies, and series directly on Telegram!"
+    )
+    
+    buttons = [[InlineKeyboardButton("🌐 Visit Website", url=settings.get("telegramUrl", "https://t.me/AnimeToonXYZ"))]]
+    if await CustomFilters.admin_filter(bot, message):
+        buttons.append([InlineKeyboardButton("🎛 Admin Panel", callback_data="admin_main")])
+    
+    await message.reply_text(welcome_text, reply_markup=InlineKeyboardMarkup(buttons))
 
 @StreamBot.on_message(filters.command("convert") & filters.private & CustomFilters.admin)
 async def convert_command(bot: Client, message: Message):
