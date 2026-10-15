@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 import mimetypes
 import secrets
 import math
+import json
 
 from Backend.logger import LOGGER
 from Backend.config import Telegram
@@ -169,6 +170,61 @@ async def get_sorted_movies(
         return sorted_movies
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/movies/stream")
+async def stream_movies(
+    sort_by: Union[List[str], str] = Query(default="updated_on:desc"),
+    genre: Optional[str] = Query(default=None),
+    year: Optional[str] = Query(default=None),
+    audio: Optional[str] = Query(default=None),
+    limit: int = Query(default=60)
+):
+    try:
+        if isinstance(sort_by, str):
+            sort_params = [tuple(sort_by.split(":"))]
+        else:
+            sort_params = [tuple(p.split(":")) for p in sort_by]
+            
+        res = await db.sort_movies(sort_params, page=1, page_size=limit, genre=genre, year=year, audio=audio)
+        movies = res.get("movies", [])
+        
+        async def generator():
+            for m in movies:
+                data = m if isinstance(m, dict) else m.dict()
+                yield json.dumps(data, default=str) + "\n"
+                
+        return StreamingResponse(generator(), media_type="application/x-ndjson")
+    except Exception as e:
+        LOGGER.error(f"Error in stream_movies: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tvshows/stream")
+async def stream_tvshows(
+    sort_by: Union[List[str], str] = Query(default="updated_on:desc"),
+    genre: Optional[str] = Query(default=None),
+    year: Optional[str] = Query(default=None),
+    audio: Optional[str] = Query(default=None),
+    limit: int = Query(default=60)
+):
+    try:
+        if isinstance(sort_by, str):
+            sort_params = [tuple(sort_by.split(":"))]
+        else:
+            sort_params = [tuple(p.split(":")) for p in sort_by]
+            
+        res = await db.sort_tv_shows(sort_params, page=1, page_size=limit, genre=genre, year=year, audio=audio)
+        tv_shows = res.get("tv_shows", [])
+        
+        async def generator():
+            for t in tv_shows:
+                data = t if isinstance(t, dict) else t.dict()
+                data["media_type"] = "tv"
+                yield json.dumps(data, default=str) + "\n"
+                
+        return StreamingResponse(generator(), media_type="application/x-ndjson")
+    except Exception as e:
+        LOGGER.error(f"Error in stream_tvshows: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/trending", response_model=dict)
 async def get_trending_media(
