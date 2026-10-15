@@ -568,8 +568,18 @@ class Database:
         title: Optional[str] = None
     ) -> Optional[dict]:
         import re
-        possible_ids = []
-        if tmdb_id is not None:
+        from bson import ObjectId
+
+        doc = None
+        # 1. Direct MongoDB ObjectId match (guarantees exact post uniqueness)
+        if tmdb_id and isinstance(tmdb_id, str) and ObjectId.is_valid(tmdb_id):
+            doc = await self.tv_collection.find_one({"_id": ObjectId(tmdb_id)})
+            if not doc:
+                doc = await self.movie_collection.find_one({"_id": ObjectId(tmdb_id)})
+
+        # 2. TMDB ID match with smart title/slug disambiguation
+        if not doc and tmdb_id is not None:
+            possible_ids = []
             possible_ids.append(tmdb_id)
             try:
                 possible_ids.append(int(tmdb_id))
@@ -578,42 +588,103 @@ class Database:
             possible_ids.append(str(tmdb_id))
             possible_ids = list(set(possible_ids))
             query = {"tmdb_id": {"$in": possible_ids}}
-        else:
-            query = {}
 
+            # Check TV Collection
+            tv_cursor = self.tv_collection.find(query)
+            tv_docs = await tv_cursor.to_list(10)
+
+            if tv_docs:
+                if len(tv_docs) > 1 and title:
+                    target_slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+                    target_words = set(target_slug.split('-'))
+                    best_doc = None
+                    best_match_score = -1
+
+                    for d in tv_docs:
+                        d_title = d.get("title", "")
+                        d_slug = re.sub(r'[^a-z0-9]+', '-', d_title.lower()).strip('-')
+                        if target_slug == d_slug:
+                            best_doc = d
+                            break
+                        # Word overlap score (e.g. "anime", "times", "dub" vs "crunchyroll", "dub")
+                        d_words = set(d_slug.split('-'))
+                        overlap = len(target_words.intersection(d_words))
+                        if overlap > best_match_score:
+                            best_match_score = overlap
+                            best_doc = d
+
+                    doc = best_doc or tv_docs[0]
+                else:
+                    doc = tv_docs[0]
+
+            # If not in TV, check Movie Collection
+            if not doc:
+                movie_cursor = self.movie_collection.find(query)
+                movie_docs = await movie_cursor.to_list(10)
+                if movie_docs:
+                    if len(movie_docs) > 1 and title:
+                        target_slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+                        target_words = set(target_slug.split('-'))
+                        best_doc = None
+                        best_match_score = -1
+
+                        for d in movie_docs:
+                            d_title = d.get("title", "")
+                            d_slug = re.sub(r'[^a-z0-9]+', '-', d_title.lower()).strip('-')
+                            if target_slug == d_slug:
+                                best_doc = d
+                                break
+                            d_words = set(d_slug.split('-'))
+                            overlap = len(target_words.intersection(d_words))
+                            if overlap > best_match_score:
+                                best_match_score = overlap
+                                best_doc = d
+
+                        doc = best_doc or movie_docs[0]
+                    else:
+                        doc = movie_docs[0]
+
+        # 3. Fallback: Lookup purely by title regex if not found yet
+        if not doc and title:
+            doc = await self.tv_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
+            if not doc:
+                clean_title = title.replace("-", " ")
+                doc = await self.tv_collection.find_one({"title": {"$regex": re.escape(clean_title), "$options": "i"}})
+            if not doc:
+                doc = await self.movie_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
+            if not doc:
+                clean_title = title.replace("-", " ")
+                doc = await self.movie_collection.find_one({"title": {"$regex": re.escape(clean_title), "$options": "i"}})
+
+        if not doc:
+            return None
+
+        # 4. Handle sub-resources (season / episode) if requested
         if episode_number is not None and season_number is not None:
-            tv_show = await self.tv_collection.find_one(query) if query else None
-            if not tv_show and title:
-                tv_show = await self.tv_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
-            if not tv_show:
-                return None
-            for season in tv_show.get("seasons", []):
+            for season in doc.get("seasons", []):
                 if season.get("season_number") == season_number:
                     for episode in season.get("episodes", []):
                         if episode.get("episode_number") == episode_number:
                             details = self._convert_object_id(episode)
                             details.update({
-                                "tmdb_id": tv_show.get("tmdb_id", tmdb_id),
+                                "tmdb_id": doc.get("tmdb_id", tmdb_id),
+                                "_id": str(doc.get("_id", "")),
                                 "type": "tv",
                                 "season_number": season_number,
                                 "episode_number": episode_number,
                                 "backdrop": episode.get("episode_backdrop"),
-                                "media_type": "tv" # Added for frontend clarity
+                                "media_type": "tv"
                             })
                             return details
             return None
 
         elif season_number is not None:
-            tv_show = await self.tv_collection.find_one(query) if query else None
-            if not tv_show and title:
-                tv_show = await self.tv_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
-            if not tv_show:
-                return None
-            for season in tv_show.get("seasons", []):
+            for season in doc.get("seasons", []):
                 if season.get("season_number") == season_number:
                     details = self._convert_object_id(season)
                     details.update({
-                        "tmdb_id": tv_show.get("tmdb_id", tmdb_id),
+                        "tmdb_id": doc.get("tmdb_id", tmdb_id),
+                        "_id": str(doc.get("_id", "")),
                         "type": "tv",
                         "season_number": season_number,
                         "media_type": "tv"
@@ -621,26 +692,11 @@ class Database:
                     return details
             return None
 
-        else:
-            tv_doc = await self.tv_collection.find_one(query) if query else None
-            if not tv_doc and title:
-                tv_doc = await self.tv_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
-            if tv_doc:
-                tv_doc = self._convert_object_id(tv_doc)
-                tv_doc["type"] = "tv"
-                tv_doc["media_type"] = "tv"
-                return tv_doc
-            
-            movie_doc = await self.movie_collection.find_one(query) if query else None
-            if not movie_doc and title:
-                movie_doc = await self.movie_collection.find_one({"title": {"$regex": f"^{re.escape(title)}$", "$options": "i"}})
-            if movie_doc:
-                movie_doc = self._convert_object_id(movie_doc)
-                movie_doc["type"] = "movie"
-                movie_doc["media_type"] = "movie"
-                return movie_doc
-            
-            return None
+        doc = self._convert_object_id(doc)
+        media_type = doc.get("media_type") or ("tv" if "seasons" in doc else "movie")
+        doc["type"] = media_type
+        doc["media_type"] = media_type
+        return doc
 
     async def get_quality_details(
         self,

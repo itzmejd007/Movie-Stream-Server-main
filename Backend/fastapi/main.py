@@ -390,14 +390,16 @@ async def get_media_details(
     tmdb_id: str, 
     season_number: Optional[int] = Query(None), 
     episode_number: Optional[int] = Query(None),
-    title: Optional[str] = Query(None)
+    title: Optional[str] = Query(None),
+    slug: Optional[str] = Query(None)
 ) -> Union[dict, None]:
     tmdb_id_val = int(tmdb_id) if tmdb_id.isdigit() else tmdb_id
+    search_title = slug or title
     details = await db.get_media_details(
         tmdb_id=tmdb_id_val, 
         season_number=season_number, 
         episode_number=episode_number,
-        title=title
+        title=search_title
     )
 
     if not details:
