@@ -663,19 +663,27 @@ class Database:
         if episode_number is not None and season_number is not None:
             for season in doc.get("seasons", []):
                 if season.get("season_number") == season_number:
-                    for episode in season.get("episodes", []):
-                        if episode.get("episode_number") == episode_number:
-                            details = self._convert_object_id(episode)
-                            details.update({
-                                "tmdb_id": doc.get("tmdb_id", tmdb_id),
-                                "_id": str(doc.get("_id", "")),
-                                "type": "tv",
-                                "season_number": season_number,
-                                "episode_number": episode_number,
-                                "backdrop": episode.get("episode_backdrop"),
-                                "media_type": "tv"
-                            })
-                            return details
+                    eps = season.get("episodes", [])
+                    # 1. Direct match by episode_number (e.g. 25 or 1)
+                    matched_ep = next((e for e in eps if e.get("episode_number") == episode_number), None)
+                    # 2. Relative index match (e.g. requesting episode 1 of Season 2 when episodes are [25, 26, ...])
+                    if not matched_ep and eps and 1 <= episode_number <= len(eps):
+                        sorted_eps = sorted(eps, key=lambda x: x.get("episode_number", 0))
+                        matched_ep = sorted_eps[episode_number - 1]
+
+                    if matched_ep:
+                        details = self._convert_object_id(matched_ep)
+                        details.update({
+                            "tmdb_id": doc.get("tmdb_id", tmdb_id),
+                            "_id": str(doc.get("_id", "")),
+                            "type": "tv",
+                            "season_number": season_number,
+                            "episode_number": matched_ep.get("episode_number", episode_number),
+                            "relative_episode_number": episode_number,
+                            "backdrop": matched_ep.get("episode_backdrop"),
+                            "media_type": "tv"
+                        })
+                        return details
             return None
 
         elif season_number is not None:

@@ -547,13 +547,17 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
             mime_type = mimetypes.guess_type(file_name)[0]
         else:
             mime_type = "application/octet-stream"
-            file_name = f"{secrets.token_hex(2)}.unknown"
+    if download:
+        mime_type = "application/octet-stream"
+    else:
+        fn_lower = (file_name or "").lower()
+        if fn_lower.endswith(".webm"):
+            mime_type = "video/webm"
+        elif fn_lower.endswith((".mp4", ".mkv", ".m4v", ".ts", ".avi")):
+            mime_type = "video/mp4"
+        elif not mime_type or not mime_type.startswith("video/"):
+            mime_type = "video/mp4"
 
-    # async def file_chunk_generator():
-    #     async for chunk in tg_connect.yield_file(
-    #         file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
-    #     ):
-    #         yield chunk
     LOGGER.info(f"{mime_type}, {file_name}, {disposition}")
     headers = {
         "Connection": "keep-alive",
@@ -561,18 +565,20 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
         "Content-Length": str(req_length),
         "Cache-Control": "public, max-age=31536000, immutable",
         "Expires": "86400",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges",
+        "X-Content-Type-Options": "nosniff",
     }
 
     if range_header:
-         headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
-    
- #   download = request.query_params.get("download")
+        headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
+
     if download:
         encoded_filename = quote(file_name)
         headers["Content-Disposition"] = (
-        f'attachment; filename="{file_name.encode("latin-1", "ignore").decode()}"; '
-        f"filename*=UTF-8''{encoded_filename}"
-    )
+            f'attachment; filename="{file_name.encode("latin-1", "ignore").decode()}"; '
+            f"filename*=UTF-8''{encoded_filename}"
+        )
         headers["Content-Type"] = "application/octet-stream"
     else:
         headers["Content-Type"] = mime_type
@@ -581,7 +587,8 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
         status_code=206 if range_header else 200,
         content=body,
         headers=headers,
-        )
+        media_type="application/octet-stream" if download else mime_type,
+    )
 
 # --- Admin Authentication & Management Endpoints ---
 
