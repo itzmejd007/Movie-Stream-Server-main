@@ -19,6 +19,29 @@ async def metadata(filename, message):
     season = data.get('season')
     episode = data.get('episode')
 
+    # Regex episode fallback if PTN missed it (common for anime)
+    if episode is None:
+        import re
+        patterns = [
+            r'\b(?:e|ep|episode)[.\s_#-]*(\d{1,4})\b',
+            r'[\s_]+-\s*(\d{1,4})(?:v\d+)?(?:[\s_\.\[\()]|$)',
+            r'\s+(\d{1,4})\s+(?:\(|\[|\d{3,4}p|mkv|mp4)',
+            r'[\s_.-](\d{1,4})\.(?:mkv|mp4|webm|avi)',
+            r'\b(\d{1,4})\b'
+        ]
+        for pat in patterns:
+            match = re.search(pat, filename, re.IGNORECASE)
+            if match:
+                val = match.group(1)
+                try:
+                    int_val = int(val)
+                    if int_val in [360, 480, 540, 720, 1080, 2160] or (1900 <= int_val <= 2099):
+                        continue
+                    episode = int_val
+                    break
+                except Exception:
+                    continue
+
     # Normalize episode and season for anime (where season is often omitted)
     if episode is not None:
         if isinstance(episode, list):
@@ -36,6 +59,13 @@ async def metadata(filename, message):
                 season = int(season)
             except (ValueError, TypeError):
                 season = 1
+
+    if not title:
+        import re
+        base = re.sub(r'\.(mkv|mp4|webm|avi)$', '', filename, flags=re.I)
+        base = re.sub(r'[\s_]+-\s*\d+.*$', '', base)
+        base = re.sub(r'\b(?:s|season)\s*\d+.*$', '', base, flags=re.I)
+        title = base.strip()
 
     year = data.get('year')
     quality = data.get('resolution')
@@ -68,9 +98,20 @@ async def metadata(filename, message):
                         if not tv_shows:
                             import re
                             clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', title).strip()
-                            tv_shows = await tmdb.search().tv(query=clean_q)
+                            clean_q = re.sub(r'\b(season|s)\s*\d+\b', '', clean_q, flags=re.IGNORECASE).strip()
+                            clean_q = re.sub(r'\b(part|cour)\s*\d+\b', '', clean_q, flags=re.IGNORECASE).strip()
+                            clean_q = re.sub(r'\s+', ' ', clean_q).strip()
+                            if clean_q:
+                                tv_shows = await tmdb.search().tv(query=clean_q)
                         if not tv_shows:
-                            print(f"TV show not found on TMDB: {title}")
+                            words = title.split()
+                            if len(words) > 3:
+                                tv_shows = await tmdb.search().tv(query=" ".join(words[:3]))
+                        if not tv_shows:
+                            print(f"TV show not found on TMDB: {title}. Trying movie search fallback...")
+                            movie_meta = await fetch_movie_metadata(title, year, quality, default_id, languages, rip)
+                            if movie_meta:
+                                return movie_meta
                             return None
                         tv_show = tv_shows[0].id  # Get first result
                         tv_show_details = await tmdb.tv(tv_show).details()

@@ -571,7 +571,9 @@ class Database:
         tmdb_id: Union[int, str],
         season_number: Optional[int] = None,
         episode_number: Optional[int] = None,
-        title: Optional[str] = None
+        title: Optional[str] = None,
+        media_type: Optional[str] = None,
+        **kwargs
     ) -> Optional[dict]:
         import re
         from bson import ObjectId
@@ -579,9 +581,14 @@ class Database:
         doc = None
         # 1. Direct MongoDB ObjectId match (guarantees exact post uniqueness)
         if tmdb_id and isinstance(tmdb_id, str) and ObjectId.is_valid(tmdb_id):
-            doc = await self.tv_collection.find_one({"_id": ObjectId(tmdb_id)})
-            if not doc:
+            if media_type == "movie":
                 doc = await self.movie_collection.find_one({"_id": ObjectId(tmdb_id)})
+            elif media_type == "tv":
+                doc = await self.tv_collection.find_one({"_id": ObjectId(tmdb_id)})
+            else:
+                doc = await self.tv_collection.find_one({"_id": ObjectId(tmdb_id)})
+                if not doc:
+                    doc = await self.movie_collection.find_one({"_id": ObjectId(tmdb_id)})
 
         # 2. TMDB ID match with smart title/slug disambiguation
         if not doc and tmdb_id is not None:

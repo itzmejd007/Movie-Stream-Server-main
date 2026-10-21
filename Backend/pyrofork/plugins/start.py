@@ -641,7 +641,20 @@ async def file_receive_handler(bot: Client, message: Message):
                     await file_queue.put((metadata_info, hash, channel, msg_id, size, display_name))
                     LOGGER.info(f"Queued file for automatic indexing: {display_name} (msg_id: {msg_id})")
                 else:
-                    LOGGER.warning(f"Could not extract metadata for file: '{title}' (file_name: '{getattr(file, 'file_name', None)}')")
+                    LOGGER.warning(f"Could not extract metadata for file: '{title}' (file_name: '{getattr(file, 'file_name', None)}'). Auto-saving to manual database so file is not lost!")
+                    manual_data = {
+                        "chat_id": channel,
+                        "msg_id": msg_id,
+                        "hash": hash,
+                        "size": size,
+                        "name": display_name,
+                        "original_name": title
+                    }
+                    try:
+                        await db.insert_manual_file(manual_data)
+                        LOGGER.info(f"File saved to manual database: {display_name} (msg_id: {msg_id})")
+                    except Exception as e:
+                        LOGGER.error(f"Error saving to manual database: {e}")
             except Exception as meta_err:
                 LOGGER.error(f"Error fetching metadata for {title}: {meta_err}", exc_info=True)
 
