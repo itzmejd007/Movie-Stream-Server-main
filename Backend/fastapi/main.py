@@ -1,6 +1,8 @@
 from os import getenv
+import re
+from datetime import datetime, timedelta
 from time import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 from Backend.helper.encrypt import decode_string
 from fastapi import FastAPI, Query, Request, HTTPException
 from pydantic import ValidationError
@@ -810,6 +812,75 @@ async def admin_bulk_delete_manual_files(payload: Dict[str, Any]):
             deleted += 1
     return {"message": f"Deleted {deleted} files."}
 
+def extract_season_episode(filename: str, parsed: Optional[dict] = None) -> Tuple[int, int]:
+    """Robustly extract season and episode numbers from filename, with anime-safe fallbacks."""
+    if parsed is None:
+        try:
+            parsed = PTN.parse(filename)
+        except Exception:
+            parsed = {}
+
+    # 1. Season detection
+    season = parsed.get("season")
+    if season is None:
+        # Check filename for Season patterns: S01, S1, Season 1, etc.
+        s_match = re.search(r'\b(?:s|season)[.\s_-]*(\d{1,2})\b', filename, re.IGNORECASE)
+        if s_match:
+            try:
+                season = int(s_match.group(1))
+            except Exception:
+                season = 1
+        else:
+            # Default season to 1 for anime / series when omitted
+            season = 1
+    elif isinstance(season, list):
+        season = season[0]
+
+    try:
+        season_num = int(season)
+    except (ValueError, TypeError):
+        season_num = 1
+
+    # 2. Episode detection
+    episode = parsed.get("episode")
+    if episode is None:
+        # Regex patterns for anime and series episode detection
+        patterns = [
+            # S01E02 or E02 or Ep 02 or Episode 2 or Ep.2
+            r'\b(?:e|ep|episode)[.\s_#-]*(\d{1,4})\b',
+            # " - 02 " or " - 002 " (common in anime release groups: SubsPlease, Erai-raws, etc.)
+            r'[\s_]+-\s*(\d{1,4})(?:v\d+)?(?:[\s_\.\[\()]|$)',
+            # " 02 " preceded by space and followed by resolution or bracket, e.g. "Title 02 [1080p]"
+            r'\s+(\d{1,4})\s+(?:\(|\[|\d{3,4}p|mkv|mp4)',
+            # Number right before file extension, e.g. "Title_02.mkv" or "Title - 02.mkv"
+            r'[\s_.-](\d{1,4})\.(?:mkv|mp4|webm|avi)',
+            # Standalone 1-4 digit number
+            r'\b(\d{1,4})\b'
+        ]
+        for pat in patterns:
+            match = re.search(pat, filename, re.IGNORECASE)
+            if match:
+                val = match.group(1)
+                try:
+                    int_val = int(val)
+                    # Ignore resolutions or release years
+                    if int_val in [360, 480, 540, 720, 1080, 2160] or (1900 <= int_val <= 2099):
+                        continue
+                    episode = int_val
+                    break
+                except Exception:
+                    continue
+    elif isinstance(episode, list):
+        episode = episode[0]
+
+    try:
+        episode_num = int(episode) if episode is not None else 1
+    except (ValueError, TypeError):
+        episode_num = 1
+
+    return season_num, episode_num
+
+
 @app.get("/api/admin/manual/files")
 async def admin_get_manual_files(
     page: int = Query(1, ge=1),
@@ -818,23 +889,26 @@ async def admin_get_manual_files(
 ):
     res = await db.get_unlinked_files(page, page_size, query)
     for file in res.get("files", []):
-        parsed = PTN.parse(file["name"])
+        filename = file.get("name", "")
+        parsed = PTN.parse(filename)
+        det_s, det_e = extract_season_episode(filename, parsed)
         file["detected"] = {
-            "quality": parsed.get("resolution"),
-            "season": parsed.get("season"),
-            "episode": parsed.get("episode"),
+            "quality": parsed.get("resolution") or "Unknown",
+            "season": det_s,
+            "episode": det_e,
             "title": parsed.get("title")
         }
     return res
 
 @app.post("/api/admin/manual/link")
 async def admin_link_manual_file(payload: Dict[str, Any], send_report: bool = True):
-    # payload: { file_id, tmdb_id, media_type, season, episode, quality, title }
+    # payload: { file_id, tmdb_id, media_type, season, episode, quality, title, doc_id }
     try:
         file_id = payload.get("file_id")
         tmdb_id = payload.get("tmdb_id")
         media_type = payload.get("media_type")
         title = payload.get("title")
+        doc_id = payload.get("doc_id")
         
         # Fetch file details from manual_files
         file_doc = await db.manual_collection.find_one({"_id": ObjectId(file_id)})
@@ -842,13 +916,12 @@ async def admin_link_manual_file(payload: Dict[str, Any], send_report: bool = Tr
             raise HTTPException(status_code=404, detail="File not found in manual database")
         
         # Smart metadata extraction from filename
-        filename = file_doc["name"]
+        filename = file_doc.get("name", "")
         parsed = PTN.parse(filename)
         
         # 1. Detect Languages (PTN first, then fallback to filename scan)
         raw_langs = parsed.get("language")
         if not raw_langs:
-            # Secondary scan: check filename for common language markers
             possible_langs = ["tamil", "telugu", "hindi", "malayalam", "kannada", "english", "bengali", "marathi", "gujarati", "punjabi", "french", "spanish", "jap", "kor", "tam", "tel", "hin", "mal", "kan", "eng", "ben", "mar", "guj", "pun", "fra", "spa"]
             filename_lower = filename.lower()
             raw_langs = [lang for lang in possible_langs if lang in filename_lower]
@@ -874,56 +947,133 @@ async def admin_link_manual_file(payload: Dict[str, Any], send_report: bool = Tr
             "size": file_doc["size"]
         }
         
-        query = {"tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]}}
-        if title:
-            query["title"] = title
+        # Find target document reliably
+        tmdb_variants = []
+        if tmdb_id is not None:
+            tmdb_variants.extend([tmdb_id, str(tmdb_id)])
+            try:
+                tmdb_variants.append(int(tmdb_id))
+            except (ValueError, TypeError):
+                pass
+
+        target_collection = db.movie_collection if media_type == "movie" else db.tv_collection
+        target_doc = None
+
+        if doc_id:
+            try:
+                target_doc = await target_collection.find_one({"_id": ObjectId(doc_id)})
+            except Exception:
+                pass
+        
+        if not target_doc and tmdb_variants:
+            target_doc = await target_collection.find_one({"tmdb_id": {"$in": tmdb_variants}})
+
+        if not target_doc and title:
+            target_doc = await target_collection.find_one({"title": title})
+
+        # Self-healing fallback: Check opposite collection if user selected wrong type tab
+        if not target_doc:
+            alt_collection = db.tv_collection if media_type == "movie" else db.movie_collection
+            if doc_id:
+                try:
+                    target_doc = await alt_collection.find_one({"_id": ObjectId(doc_id)})
+                except Exception:
+                    pass
+            if not target_doc and tmdb_variants:
+                target_doc = await alt_collection.find_one({"tmdb_id": {"$in": tmdb_variants}})
+            if not target_doc and title:
+                target_doc = await alt_collection.find_one({"title": title})
+            if target_doc:
+                target_collection = alt_collection
+                media_type = "tv" if alt_collection == db.tv_collection else "movie"
+
+        if not target_doc:
+            raise HTTPException(status_code=400, detail=f"Target media not found in database (tmdb_id: {tmdb_id}, title: {title})")
+
+        media_id = target_doc["_id"]
+        actual_tmdb_id = target_doc.get("tmdb_id", tmdb_id)
 
         if media_type == "movie":
-            # Link to movie
             update_op = {
-                "$push": {"telegram": quality_detail}
+                "$push": {"telegram": quality_detail},
+                "$set": {"updated_on": datetime.utcnow()}
             }
             if detected_languages:
                 update_op["$addToSet"] = {"languages": {"$each": detected_languages}}
 
-            result = await db.movie_collection.update_one(query, update_op)
+            result = await db.movie_collection.update_one({"_id": media_id}, update_op)
         else:
-            # Link to TV episode
-            season_num = int(payload.get("season"))
-            episode_num = int(payload.get("episode"))
-            
-            # Ensure Season exists
-            await db.tv_collection.update_one(
-                {"tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]}, "seasons.season_number": {"$ne": season_num}},
-                {"$push": {"seasons": {"season_number": season_num, "episodes": []}}}
-            )
-            # Ensure Episode exists in that season
-            await db.tv_collection.update_one(
-                {
-                    "tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]},
-                    "seasons": {
-                        "$elemMatch": {
-                            "season_number": season_num,
-                            "episodes.episode_number": {"$ne": episode_num}
-                        }
-                    }
-                },
-                {"$push": {"seasons.$.episodes": {
-                    "episode_number": episode_num, 
-                    "title": f"Episode {episode_num}", 
-                    "episode_backdrop": "", 
-                    "telegram": []
-                }}}
-            )
+            # Safe Season & Episode extraction
+            season_val = payload.get("season")
+            episode_val = payload.get("episode")
 
+            if season_val is None or episode_val is None:
+                detected_s, detected_e = extract_season_episode(filename, parsed)
+                if season_val is None:
+                    season_val = detected_s
+                if episode_val is None:
+                    episode_val = detected_e
+
+            if isinstance(season_val, list):
+                season_val = season_val[0]
+            if isinstance(episode_val, list):
+                episode_val = episode_val[0]
+
+            try:
+                season_num = int(season_val) if season_val is not None else 1
+            except (ValueError, TypeError):
+                season_num = 1
+
+            try:
+                episode_num = int(episode_val) if episode_val is not None else 1
+            except (ValueError, TypeError):
+                episode_num = 1
+
+            # 1. Ensure Season exists in TV show
+            season_exists = await db.tv_collection.find_one({
+                "_id": media_id,
+                "seasons.season_number": season_num
+            })
+            if not season_exists:
+                await db.tv_collection.update_one(
+                    {"_id": media_id},
+                    {"$push": {"seasons": {"season_number": season_num, "episodes": []}}}
+                )
+
+            # 2. Ensure Episode exists in that season
+            episode_exists = await db.tv_collection.find_one({
+                "_id": media_id,
+                "seasons": {
+                    "$elemMatch": {
+                        "season_number": season_num,
+                        "episodes.episode_number": episode_num
+                    }
+                }
+            })
+            if not episode_exists:
+                await db.tv_collection.update_one(
+                    {
+                        "_id": media_id,
+                        "seasons.season_number": season_num
+                    },
+                    {"$push": {"seasons.$.episodes": {
+                        "episode_number": episode_num, 
+                        "title": f"Episode {episode_num}", 
+                        "episode_backdrop": "", 
+                        "telegram": []
+                    }}}
+                )
+
+            # 3. Push stream into episode & update timestamp
             update_op = {
-                "$push": {"seasons.$[s].episodes.$[e].telegram": quality_detail}
+                "$push": {"seasons.$[s].episodes.$[e].telegram": quality_detail},
+                "$set": {"updated_on": datetime.utcnow()}
             }
             if detected_languages:
                 update_op["$addToSet"] = {"languages": {"$each": detected_languages}}
 
             result = await db.tv_collection.update_one(
-                query,
+                {"_id": media_id},
                 update_op,
                 array_filters=[
                     {"s.season_number": season_num},
@@ -935,50 +1085,56 @@ async def admin_link_manual_file(payload: Dict[str, Any], send_report: bool = Tr
             await db.link_manual_file(file_id)
             # Send notification
             if send_report:
-                metadata_info = await db.get_media_details(tmdb_id=tmdb_id, media_type=media_type)
+                metadata_info = await db.get_media_details(tmdb_id=actual_tmdb_id, media_type=media_type)
                 if metadata_info:
-                    await send_log_report(metadata_info, mode="Manual")
+                    try:
+                        await send_log_report(metadata_info, mode="Manual")
+                    except Exception as log_err:
+                        LOGGER.error(f"Error sending log report: {log_err}")
             return {"message": "File linked successfully"}
         else:
-            raise HTTPException(status_code=400, detail=f"Failed to link. Target media (ID: {tmdb_id}) not found or structure invalid (missing Season/Episode).")
+            raise HTTPException(status_code=400, detail=f"Failed to link. Target media (ID: {actual_tmdb_id}) could not be updated.")
+    except HTTPException:
+        raise
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid data types in request: {str(e)}")
     except Exception as e:
-        LOGGER.error(f"Link error: {str(e)}")
+        LOGGER.error(f"Link error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 @app.post("/api/admin/manual/bulk_link")
 async def admin_bulk_link_manual_files(payload: Dict[str, Any]):
-    # payload: { file_ids: [], tmdb_id, media_type, title, quality, season, episode }
+    # payload: { file_ids: [], tmdb_id, media_type, title, quality, season, episode, doc_id }
     file_ids = payload.get("file_ids", [])
     tmdb_id = payload.get("tmdb_id")
     media_type = payload.get("media_type")
     title = payload.get("title")
+    doc_id = payload.get("doc_id")
     
     success_count = 0
     errors = []
     
     for fid in file_ids:
         try:
-            # We reuse the logic but allow override or auto-detect
-            # We simulate a single link call for each
-            # To handle TV shows with auto S/E, we need to re-parse per file
             file_doc = await db.manual_collection.find_one({"_id": ObjectId(fid)})
-            if not file_doc: continue
+            if not file_doc:
+                errors.append(f"File {fid}: File not found in manual database")
+                continue
             
-            parsed = PTN.parse(file_doc["name"])
+            filename = file_doc.get("name", "")
+            parsed = PTN.parse(filename)
+            detected_s, detected_e = extract_season_episode(filename, parsed)
             
-            # For bulk, if season/episode not in payload, use detected
-            f_season = payload.get("season") or parsed.get("season")
-            f_episode = payload.get("episode") or parsed.get("episode")
+            f_season = payload.get("season") or detected_s
+            f_episode = payload.get("episode") or detected_e
             f_quality = payload.get("quality") or parsed.get("resolution") or "Unknown"
             
-            # Prepare dummy payload for single link call
             link_payload = {
                 "file_id": fid,
                 "tmdb_id": tmdb_id,
                 "media_type": media_type,
                 "title": title,
+                "doc_id": doc_id,
                 "quality": f_quality,
                 "season": f_season,
                 "episode": f_episode
@@ -986,19 +1142,26 @@ async def admin_bulk_link_manual_files(payload: Dict[str, Any]):
             
             res = await admin_link_manual_file(link_payload, send_report=False)
             success_count += 1
+        except HTTPException as he:
+            errors.append(f"File {fid}: {he.status_code}: {he.detail}")
         except Exception as e:
             errors.append(f"File {fid}: {str(e)}")
+            LOGGER.error(f"Error bulk linking file {fid}: {e}", exc_info=True)
             
     if success_count > 1:
         metadata_info = await db.get_media_details(tmdb_id=tmdb_id, media_type=media_type)
         if metadata_info:
-            await send_bulk_log_report(metadata_info, success_count, mode="Manual Bulk")
+            try:
+                await send_bulk_log_report(metadata_info, success_count, mode="Manual Bulk")
+            except Exception as log_err:
+                LOGGER.error(f"Error sending bulk log report: {log_err}")
     elif success_count == 1:
-        # Already handled by admin_link_manual_file if it was called? 
-        # Wait, bulk_link calls admin_link_manual_file for each.
-        # So Message 1 and 2 will be sent for EACH file.
-        # Maybe I should disable individual reports in bulk link?
-        pass
+        metadata_info = await db.get_media_details(tmdb_id=tmdb_id, media_type=media_type)
+        if metadata_info:
+            try:
+                await send_log_report(metadata_info, mode="Manual")
+            except Exception as log_err:
+                LOGGER.error(f"Error sending log report: {log_err}")
 
     return {"message": f"Successfully linked {success_count} files.", "errors": errors}
 
