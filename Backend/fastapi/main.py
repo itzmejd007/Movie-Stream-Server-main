@@ -903,30 +903,34 @@ async def admin_get_manual_files(
 @app.post("/api/admin/manual/sync")
 async def admin_sync_manual_files():
     try:
-        synced_count = 0
-        channels_to_sync = []
+        synced_manual = 0
+        synced_auto = 0
 
-        for c in Telegram.MANUAL_CHANNEL:
-            f, _ = get_channel_id_pair(c)
-            try:
-                channels_to_sync.append(int(f))
-            except Exception:
-                pass
-
+        # Set of auth channel ids
+        auth_set = set()
         for c in Telegram.AUTH_CHANNEL:
-            f, _ = get_channel_id_pair(c)
+            f, d = get_channel_id_pair(c)
+            auth_set.add(f)
+            auth_set.add(d)
+
+        channels_to_scan = []
+        for c in Telegram.MANUAL_CHANNEL + Telegram.AUTH_CHANNEL:
+            f, d = get_channel_id_pair(c)
             try:
                 val = int(f)
-                if val not in channels_to_sync:
-                    channels_to_sync.append(val)
+                if val not in channels_to_scan:
+                    channels_to_scan.append(val)
             except Exception:
                 pass
 
-        LOGGER.info(f"Synchronizing repository from channels: {channels_to_sync}")
+        LOGGER.info(f"Synchronizing repository from channels: {channels_to_scan}")
 
-        for channel_id in channels_to_sync:
+        for channel_id in channels_to_scan:
+            full_id, digit_id = get_channel_id_pair(channel_id)
+            is_auth_channel = (full_id in auth_set) or (digit_id in auth_set)
+            
             try:
-                LOGGER.info(f"Scanning channel history for chat_id={channel_id}...")
+                LOGGER.info(f"Scanning channel history for chat_id={channel_id} (is_auth={is_auth_channel})...")
                 async for msg in StreamBot.get_chat_history(channel_id, limit=100):
                     file = msg.video or msg.document or msg.audio
                     if not file:
@@ -941,13 +945,37 @@ async def admin_sync_manual_files():
                     msg_id = msg.id
                     file_hash = file.file_unique_id[:6]
                     size = get_readable_file_size(file.file_size)
-                    ch_num = int(str(channel_id).replace("-100", ""))
+                    ch_num = int(digit_id)
 
                     display_name = remove_urls(title)
                     display_name = clean_filename(display_name)
                     if not display_name.lower().endswith(('.mkv', '.mp4', '.webm')):
                         display_name += '.mkv'
 
+                    # If it's an AUTH channel, attempt automatic metadata & indexing first!
+                    if is_auth_channel:
+                        try:
+                            cleaned_name = clean_filename(title)
+                            metadata_info = await get_media_metadata(cleaned_name, msg)
+                            if metadata_info is None and Telegram.USE_CAPTION and getattr(file, "file_name", None):
+                                raw_fallback = clean_filename(file.file_name)
+                                if raw_fallback != cleaned_name:
+                                    metadata_info = await get_media_metadata(raw_fallback, msg)
+                                    if metadata_info:
+                                        display_name = raw_fallback
+                            
+                            if metadata_info is not None:
+                                updated_id = await db.insert_media(
+                                    metadata_info, hash=file_hash, channel=ch_num, msg_id=msg_id, size=size, name=display_name
+                                )
+                                if updated_id:
+                                    synced_auto += 1
+                                    LOGGER.info(f"Auto-synced {title} to website library (ID: {updated_id})")
+                                    continue
+                        except Exception as auto_err:
+                            LOGGER.error(f"Error auto-syncing file {title}: {auto_err}")
+
+                    # Manual channel OR auth fallback: Save to manual_files
                     manual_data = {
                         "chat_id": ch_num,
                         "msg_id": msg_id,
@@ -957,12 +985,15 @@ async def admin_sync_manual_files():
                         "original_name": title
                     }
                     if await db.insert_manual_file(manual_data):
-                        synced_count += 1
+                        synced_manual += 1
             except Exception as ch_err:
                 LOGGER.error(f"Error reading channel history for {channel_id}: {ch_err}")
 
-        LOGGER.info(f"Repository synchronization complete: {synced_count} new file(s) indexed.")
-        return {"message": f"Repository synchronized successfully! {synced_count} new file(s) indexed."}
+        LOGGER.info(f"Sync complete: {synced_manual} manual file(s) indexed, {synced_auto} auto file(s) indexed.")
+        msg = f"Repository synchronized successfully! {synced_manual} manual file(s) added to Orphan Hub"
+        if synced_auto > 0:
+            msg += f", {synced_auto} file(s) automatically added to Website Library."
+        return {"message": msg}
     except Exception as e:
         LOGGER.error(f"Error in admin_sync_manual_files: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Sync error: {str(e)}")
