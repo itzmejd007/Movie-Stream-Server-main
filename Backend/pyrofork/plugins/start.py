@@ -540,7 +540,7 @@ for i in range(2):
     create_task(process_file(i + 1))
 
 @StreamBot.on_message(
-    filters.channel
+    (filters.channel | filters.group)
     & (
         filters.document
         | filters.video
@@ -549,6 +549,7 @@ for i in range(2):
 async def file_receive_handler(bot: Client, message: Message):
     try:
         chat_id_str = str(message.chat.id)
+        chat_title = getattr(message.chat, "title", None) or getattr(message.chat, "type", "Unknown")
 
         # Build set of valid channel IDs (handling with and without -100 prefix)
         auth_channels = set()
@@ -572,17 +573,24 @@ async def file_receive_handler(bot: Client, message: Message):
         is_auth = (chat_id_str in auth_channels) or (chat_id_str.replace("-100", "") in auth_channels)
         is_manual = (chat_id_str in manual_channels) or (chat_id_str.replace("-100", "") in manual_channels)
 
-        if not (is_auth or is_manual):
-            # Silently ignore channels not in AUTH/MANUAL list
-            return
-
         file = message.video or message.document
         if not file:
             return
 
+        file_display = getattr(file, "file_name", None) or f"id_{message.id}"
+        LOGGER.info(f"Incoming media message #{message.id} from chat {chat_title} (ID: {chat_id_str}), file: '{file_display}'")
+
+        if not (is_auth or is_manual):
+            LOGGER.warning(
+                f"Ignored post from unauthorized chat_id={chat_id_str} ({chat_title}). "
+                f"Configured AUTH_CHANNEL={Telegram.AUTH_CHANNEL}, MANUAL_CHANNEL={Telegram.MANUAL_CHANNEL}"
+            )
+            return
+
         caption = (message.caption or "").strip()
         if Telegram.USE_CAPTION and caption:
-            title = caption.replace("\n", "\\n")
+            # Replace newlines with spaces so PTN can parse cleanly
+            title = re.sub(r'[\r\n]+', ' ', caption).strip()
         else:
             title = getattr(file, "file_name", None) or f"{file.file_unique_id}.mkv"
 
@@ -616,12 +624,24 @@ async def file_receive_handler(bot: Client, message: Message):
         if is_auth:
             try:
                 cleaned_name = clean_filename(title)
+                LOGGER.info(f"Extracting metadata for: '{cleaned_name}' (from title: '{title}')")
                 metadata_info = await metadata(cleaned_name, message)
+
+                # Resilient fallback: If caption was used and metadata failed, try parsing actual file_name
+                if metadata_info is None and Telegram.USE_CAPTION and getattr(file, "file_name", None):
+                    raw_filename = file.file_name
+                    cleaned_fallback = clean_filename(raw_filename)
+                    if cleaned_fallback != cleaned_name:
+                        LOGGER.info(f"Caption metadata failed for '{title}'. Falling back to file_name: '{cleaned_fallback}'")
+                        metadata_info = await metadata(cleaned_fallback, message)
+                        if metadata_info:
+                            display_name = cleaned_fallback
+
                 if metadata_info is not None:
                     await file_queue.put((metadata_info, hash, channel, msg_id, size, display_name))
                     LOGGER.info(f"Queued file for automatic indexing: {display_name} (msg_id: {msg_id})")
                 else:
-                    LOGGER.warning(f"Could not extract metadata for file: {title}")
+                    LOGGER.warning(f"Could not extract metadata for file: '{title}' (file_name: '{getattr(file, 'file_name', None)}')")
             except Exception as meta_err:
                 LOGGER.error(f"Error fetching metadata for {title}: {meta_err}", exc_info=True)
 

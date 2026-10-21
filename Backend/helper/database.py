@@ -131,9 +131,12 @@ class Database:
             return None
 
         existing_media = await self.tv_collection.find_one({
-            "tmdb_id": int(tv_show_dict["tmdb_id"]),
-            "title": tv_show_dict["title"]
+            "tmdb_id": int(tv_show_dict["tmdb_id"])
         })
+        if not existing_media:
+            existing_media = await self.tv_collection.find_one({
+                "title": tv_show_dict["title"]
+            })
 
         if not existing_media:
             result = await self.tv_collection.insert_one(tv_show_dict)
@@ -191,11 +194,14 @@ class Database:
             LOGGER.error(f"Validation error: {e}")
             return None
 
-        # Match by both ID and Title to allow intentional duplicates with different names
+        # Match primarily by tmdb_id with fallback to title
         existing_media = await self.movie_collection.find_one({
-            "tmdb_id": movie_dict["tmdb_id"],
-            "title": movie_dict["title"]
+            "tmdb_id": movie_dict["tmdb_id"]
         })
+        if not existing_media:
+            existing_media = await self.movie_collection.find_one({
+                "title": movie_dict["title"]
+            })
 
         if not existing_media:
             result = await self.movie_collection.insert_one(movie_dict)

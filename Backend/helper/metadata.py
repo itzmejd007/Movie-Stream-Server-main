@@ -195,10 +195,22 @@ async def fetch_movie_metadata(title, year=None, quality=None, default_id=None, 
             if default_id is None:
                 if Telegram.USE_TMDB:
                     movies = await tmdb.search().movies(query=title, year=year if year else None)
+                    if not movies and year:
+                        movies = await tmdb.search().movies(query=title)
+                    if not movies:
+                        import re
+                        clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', title).strip()
+                        movies = await tmdb.search().movies(query=clean_q)
+                    if not movies:
+                        print(f"Movie not found on TMDB: {title}")
+                        return None
                     movie_id = movies[0].id
                     movies_details = await tmdb.movie(int(movie_id)).details()
                 else:
                     movies = await search_title(query=query, type="movie")
+                    if not movies or 'id' not in movies:
+                        print(f"Movie not found on IMDb: {query}")
+                        return None
                     movie_id = movies['id']
                     movies_details = await get_detail(imdb_id=movie_id)
             else:
@@ -208,19 +220,21 @@ async def fetch_movie_metadata(title, year=None, quality=None, default_id=None, 
                     movies_details = await tmdb.movie(int(default_id)).details()
 
             # Extract relevant movie metadata
-            tmdb_id = int(movies_details.id) if Telegram.USE_TMDB else int(movies_details['id'].replace("tt", ""))
+            tmdb_id = int(movies_details.id) if Telegram.USE_TMDB else int(str(movies_details['id']).replace("tt", ""))
             title = movies_details.title if Telegram.USE_TMDB else movies_details['title']
-            year = movies_details.release_date.year if Telegram.USE_TMDB else movies_details['releaseDetailed']['year']
-            rate = movies_details.vote_average if Telegram.USE_TMDB else movies_details['rating']['star']
-            description = movies_details.overview if Telegram.USE_TMDB else movies_details['plot']
-            poster = f"https://image.tmdb.org/t/p/w500{movies_details.poster_path}" if Telegram.USE_TMDB else movies_details['image']
-            backdrop = f"https://image.tmdb.org/t/p/original{movies_details.backdrop_path}" if Telegram.USE_TMDB else None
+            year = movies_details.release_date.year if (Telegram.USE_TMDB and movies_details.release_date) else (movies_details.get('releaseDetailed', {}).get('year') if isinstance(movies_details, dict) else year)
+            rate = movies_details.vote_average if Telegram.USE_TMDB else movies_details.get('rating', {}).get('star', 0)
+            description = movies_details.overview if Telegram.USE_TMDB else movies_details.get('plot', '')
+            poster = f"https://image.tmdb.org/t/p/w500{movies_details.poster_path}" if (Telegram.USE_TMDB and movies_details.poster_path) else (movies_details.get('image', '') if isinstance(movies_details, dict) else '')
+            backdrop = f"https://image.tmdb.org/t/p/original{movies_details.backdrop_path}" if (Telegram.USE_TMDB and movies_details.backdrop_path) else ''
             
-            if not backdrop:
-                movies = await tmdb.search().movies(query=title, year=year)
-                movie = movies[0].id
-                movies_details_force = await tmdb.movie(movie).details()
-                backdrop = f"https://image.tmdb.org/t/p/original{movies_details_force.backdrop_path}"
+            if not backdrop and Telegram.USE_TMDB:
+                try:
+                    more_movies = await tmdb.search().movies(query=title)
+                    if more_movies and more_movies[0].backdrop_path:
+                        backdrop = f"https://image.tmdb.org/t/p/original{more_movies[0].backdrop_path}"
+                except Exception:
+                    pass
 
             runtime = movies_details.runtime if Telegram.USE_TMDB else movies_details['runtimeSeconds'] // 60
             media_type = "movie"
