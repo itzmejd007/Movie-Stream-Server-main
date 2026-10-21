@@ -26,7 +26,7 @@ from Backend.pyrofork import StreamBot, work_loads, multi_clients
 from Backend.helper.exceptions import InvalidHash
 from Backend.helper.custom_dl import ByteStreamer
 from fastapi.middleware.cors import CORSMiddleware
-from Backend.helper.pyro import get_readable_time, normalize_languages
+from Backend.helper.pyro import get_readable_time, normalize_languages, get_channel_id_pair, remove_urls, clean_filename, get_readable_file_size
 from Backend.helper.modal import SettingsSchema, MovieSchema, TVShowSchema
 from Backend import StartTime, __version__, db
 from Backend.helper.metadata import search_tmdb, search_imdb, get_external_details, fetch_movie_metadata, metadata as get_media_metadata
@@ -899,6 +899,73 @@ async def admin_get_manual_files(
             "title": parsed.get("title")
         }
     return res
+
+@app.post("/api/admin/manual/sync")
+async def admin_sync_manual_files():
+    try:
+        synced_count = 0
+        channels_to_sync = []
+
+        for c in Telegram.MANUAL_CHANNEL:
+            f, _ = get_channel_id_pair(c)
+            try:
+                channels_to_sync.append(int(f))
+            except Exception:
+                pass
+
+        for c in Telegram.AUTH_CHANNEL:
+            f, _ = get_channel_id_pair(c)
+            try:
+                val = int(f)
+                if val not in channels_to_sync:
+                    channels_to_sync.append(val)
+            except Exception:
+                pass
+
+        LOGGER.info(f"Synchronizing repository from channels: {channels_to_sync}")
+
+        for channel_id in channels_to_sync:
+            try:
+                LOGGER.info(f"Scanning channel history for chat_id={channel_id}...")
+                async for msg in StreamBot.get_chat_history(channel_id, limit=100):
+                    file = msg.video or msg.document or msg.audio
+                    if not file:
+                        continue
+
+                    caption = (msg.caption or "").strip()
+                    if Telegram.USE_CAPTION and caption:
+                        title = re.sub(r'[\r\n]+', ' ', caption).strip()
+                    else:
+                        title = getattr(file, "file_name", None) or f"{file.file_unique_id}.mkv"
+
+                    msg_id = msg.id
+                    file_hash = file.file_unique_id[:6]
+                    size = get_readable_file_size(file.file_size)
+                    ch_num = int(str(channel_id).replace("-100", ""))
+
+                    display_name = remove_urls(title)
+                    display_name = clean_filename(display_name)
+                    if not display_name.lower().endswith(('.mkv', '.mp4', '.webm')):
+                        display_name += '.mkv'
+
+                    manual_data = {
+                        "chat_id": ch_num,
+                        "msg_id": msg_id,
+                        "hash": file_hash,
+                        "size": size,
+                        "name": display_name,
+                        "original_name": title
+                    }
+                    if await db.insert_manual_file(manual_data):
+                        synced_count += 1
+            except Exception as ch_err:
+                LOGGER.error(f"Error reading channel history for {channel_id}: {ch_err}")
+
+        LOGGER.info(f"Repository synchronization complete: {synced_count} new file(s) indexed.")
+        return {"message": f"Repository synchronized successfully! {synced_count} new file(s) indexed."}
+    except Exception as e:
+        LOGGER.error(f"Error in admin_sync_manual_files: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Sync error: {str(e)}")
 
 @app.post("/api/admin/manual/link")
 async def admin_link_manual_file(payload: Dict[str, Any], send_report: bool = True):
