@@ -20,6 +20,9 @@ def is_media(message):
     return next((getattr(message, attr) for attr in ["document", "photo", "video", "audio", "voice", "video_note", "sticker", "animation"] if getattr(message, attr)), None)
 
 async def get_file_ids(client: Client, chat_id: int, message_id: int) -> Optional[FileId]:
+    chat_str = str(chat_id).strip()
+    if not chat_str.startswith("-"):
+        chat_id = int(f"-100{chat_str}")
     message = await client.get_messages(chat_id, message_id)
     if message.empty:
         raise FIleNotFound
