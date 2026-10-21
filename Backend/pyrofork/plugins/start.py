@@ -280,12 +280,18 @@ async def start(bot: Client, message: Message):
                 create_task(delete_messages_after_delay([sent_msg, warning_msg]))
             except FloodWait as e:
                 LOGGER.info(f"Sleeping for {e.value}s due to floodwait")
-                await asleep(e.value)
-                sent_msg = await message.reply_cached_media(file_id=media.file_id, caption=caption)
-                warning_msg = await message.reply_text(
-                    "⚠️ Forward these files to your saved messages. These files will be deleted from the bot within 5 minutes."
-                )
-                create_task(delete_messages_after_delay([sent_msg, warning_msg]))
+                await asleep(e.value + 1)
+                try:
+                    tg_msg = await bot.get_messages(chat_id, msg_id)
+                    media = tg_msg.document or tg_msg.video or tg_msg.audio
+                    if media:
+                        sent_msg = await message.reply_cached_media(file_id=media.file_id, caption=caption)
+                        warning_msg = await message.reply_text(
+                            "⚠️ Forward these files to your saved messages. These files will be deleted from the bot within 5 minutes."
+                        )
+                        create_task(delete_messages_after_delay([sent_msg, warning_msg]))
+                except Exception as fw_err:
+                    LOGGER.error(f"Error after floodwait in get_: {fw_err}")
             except Exception as e:
                 LOGGER.error(f"Error retrieving/sending media for get_: {e}")
                 await message.reply_text("❌ Error retrieving media from storage channel.")
@@ -294,77 +300,82 @@ async def start(bot: Client, message: Message):
             await message.reply_text("❌ Failed to process file request.")
         return
 
-    # Handle file_tmdbId_quality or file_tmdbId_season_quality links
+    # Handle file_tmdbId_quality or file_tmdbId_season_quality or file_tmdbId_season_episode_quality links
     elif command_part.startswith("file_"):
         usr_cmd = command_part[len("file_"):].strip()
         parts = usr_cmd.split("_")
-        
-        if len(parts) == 2:
-            try:
-                tmdb_id, quality = parts
-                tmdb_id = int(tmdb_id)
-                season = None
+
+        if len(parts) < 2:
+            await message.reply_text("Invalid command format.")
+            return
+
+        tmdb_id = parts[0]
+        season = None
+        episode = None
+        quality = "all"
+
+        try:
+            if len(parts) == 2:
+                quality = parts[1]
                 quality_details = await db.get_quality_details(tmdb_id, quality)
-            except ValueError:
-                LOGGER.error(f"Error parsing movie command: {usr_cmd}")
-                await message.reply_text("Invalid command format for movie.")
-                return
-        
-        elif len(parts) == 3:
-            try:
-                tmdb_id, season, quality = parts
-                tmdb_id = int(tmdb_id)
-                season = int(season)
-                quality_details = await db.get_quality_details(tmdb_id, quality, season)
-            except ValueError:
-                LOGGER.error(f"Error parsing TV show command: {usr_cmd}")
-                await message.reply_text("Invalid command format for TV show.")
-                return
-        elif len(parts) == 4:
-            try:
-                tmdb_id, season, episode, quality = parts
-                tmdb_id = int(tmdb_id)
-                season = int(season)
-                episode = int(episode)
-                quality_details = await db.get_quality_details(tmdb_id, quality, season, episode)
-            except ValueError:
-                LOGGER.error(f"Error parsing TV show command: {usr_cmd}")
-                await message.reply_text("Invalid command format for TV show.")
-                return
-        else:
+            elif len(parts) == 3:
+                season = int(parts[1]) if parts[1].isdigit() else parts[1]
+                quality = parts[2]
+                quality_details = await db.get_quality_details(tmdb_id, quality, season=season)
+            else:
+                season = int(parts[1]) if parts[1].isdigit() else parts[1]
+                episode = int(parts[2]) if parts[2].isdigit() else parts[2]
+                quality = "_".join(parts[3:])
+                quality_details = await db.get_quality_details(tmdb_id, quality, season=season, episode=episode)
+        except Exception as parse_err:
+            LOGGER.error(f"Error parsing file_ command {usr_cmd}: {parse_err}")
             await message.reply_text("Invalid command format.")
             return
 
         sent_messages = []
         for detail in quality_details:
-            decoded_data = await decode_string(detail['id'])
-            raw_cid = str(decoded_data.get('chat_id', ''))
-            channel = int(raw_cid) if raw_cid.startswith("-") else int(f"-100{raw_cid}")
-            msg_id = int(decoded_data['msg_id'])
-            name = detail['name']
-            if "\\n" in name and name.endswith(".mkv"):
-                name = name.rsplit(".mkv", 1)[0].replace("\\n", "\n")
             try:
+                decoded_data = await decode_string(detail.get('id', ''))
+                if not decoded_data.get('chat_id') or not decoded_data.get('msg_id'):
+                    continue
+                raw_cid = str(decoded_data.get('chat_id', ''))
+                channel = int(raw_cid) if raw_cid.startswith("-") else int(f"-100{raw_cid}")
+                msg_id = int(decoded_data['msg_id'])
+                name = detail.get('name', 'Media')
+                if "\\n" in name and name.endswith(".mkv"):
+                    name = name.rsplit(".mkv", 1)[0].replace("\\n", "\n")
+
                 file = await bot.get_messages(channel, msg_id)
                 media = file.document or file.video or file.audio
                 if media:
+                    custom_caption = settings.get("telegramCaption")
+                    if custom_caption:
+                        try:
+                            caption = custom_caption.format(
+                                title=name,
+                                size=get_readable_file_size(getattr(media, "file_size", 0))
+                            )
+                        except Exception:
+                            caption = name
+                    else:
+                        caption = name
+
                     sent_msg = await message.reply_cached_media(
                         file_id=media.file_id,
-                        caption=f'{name}'
+                        caption=caption
                     )
                     sent_messages.append(sent_msg)
                     await asleep(1)
             except FloodWait as e:
-                LOGGER.info(f"Sleeping for {e.value}s")
-                await asleep(e.value)
-                await message.reply_text(f"Got Floodwait of {e.value}s")
+                LOGGER.info(f"Sleeping for {e.value}s in file_")
+                await asleep(e.value + 1)
             except Exception as e:
-                LOGGER.error(f"Error retrieving/sending media: {e}")
-                await message.reply_text("Error retrieving media.")
+                LOGGER.error(f"Error retrieving/sending media in file_: {e}")
 
         if sent_messages:
             warning_msg = await message.reply_text(
-                "Forward these files to your saved messages. These files will be deleted from the bot within 5 minutes."
+                "⚠️ **Forward these files to your Saved Messages.**\n"
+                "These files will be automatically deleted from the bot within 5 minutes."
             )
             sent_messages.append(warning_msg)
             create_task(delete_messages_after_delay(sent_messages))
@@ -487,28 +498,46 @@ db_lock = Lock()
 
 from Backend.helper.notification import send_log_report
 
-async def process_file():
+async def process_file(worker_id: int = 1):
+    LOGGER.info(f"Background file processing worker {worker_id} started.")
     while True:
-        metadata_info, hash, channel, msg_id, size, title = await file_queue.get()
+        try:
+            item = await file_queue.get()
+            if not item:
+                continue
+            metadata_info, hash, channel, msg_id, size, title = item
 
-        # Acquire the lock before updating the database
-        async with db_lock:
-            updated_id = await db.insert_media(metadata_info, hash=hash, channel=channel, msg_id=msg_id, size=size, name=title)
+            # Acquire the lock before updating the database
+            async with db_lock:
+                try:
+                    updated_id = await db.insert_media(
+                        metadata_info, hash=hash, channel=channel, msg_id=msg_id, size=size, name=title
+                    )
 
-            if updated_id:
-                LOGGER.info(f"{metadata_info['media_type']} updated with ID: {updated_id}")
-                # Send log report
-                await send_log_report(metadata_info, mode="Automatic")
-            else:
-                LOGGER.info("Update failed due to validation errors.")
+                    if updated_id:
+                        LOGGER.info(f"[{worker_id}] {metadata_info.get('media_type', 'media')} updated with ID: {updated_id}")
+                        try:
+                            await send_log_report(metadata_info, mode="Automatic")
+                        except Exception as log_err:
+                            LOGGER.error(f"[{worker_id}] Error sending log report: {log_err}")
+                    else:
+                        LOGGER.info(f"[{worker_id}] Update completed/skipped for: {title}")
+                except Exception as db_err:
+                    LOGGER.error(f"[{worker_id}] Error inserting media into database: {db_err}", exc_info=True)
 
-        file_queue.task_done()
+            file_queue.task_done()
+        except asyncio.CancelledError:
+            LOGGER.info(f"Worker {worker_id} cancelled.")
+            break
+        except Exception as e:
+            LOGGER.error(f"[{worker_id}] Unexpected error in process_file worker: {e}", exc_info=True)
+            await asleep(1)
 
 
 
-# Start the file processing tasks (adjust the number of workers as needed)
-for _ in range(1):  # Two concurrent workers
-    create_task(process_file())
+# Start resilient file processing tasks
+for i in range(2):
+    create_task(process_file(i + 1))
 
 @StreamBot.on_message(
     filters.channel
@@ -518,60 +547,90 @@ for _ in range(1):  # Two concurrent workers
     )
 )
 async def file_receive_handler(bot: Client, message: Message):
-    chat_id_str = str(message.chat.id)
-    is_auth = chat_id_str in Telegram.AUTH_CHANNEL
-    is_manual = chat_id_str in Telegram.MANUAL_CHANNEL
+    try:
+        chat_id_str = str(message.chat.id)
 
-    if is_auth or is_manual:
-        try:
-            if message.video or message.document:
-                file = message.video or message.document
-                if Telegram.USE_CAPTION and message.caption:
-                    title = message.caption.replace("\n", "\\n")
-                else:
-                    title = file.file_name or file.file_id
-                
-                msg_id = message.id
-                hash = file.file_unique_id[:6]
-                size = get_readable_file_size(file.file_size)
-                channel = chat_id_str.replace("-100","")
-                
-                # Improve file display name filtering for manual database
-                display_name = remove_urls(title)
-                display_name = clean_filename(display_name)
-                
-                if not display_name.lower().endswith('.mkv') and not display_name.lower().endswith('.mp4'):
-                    display_name += '.mkv'
-
-                if is_manual:
-                    # Save to manual database for manual linking
-                    manual_data = {
-                        "chat_id": int(channel),
-                        "msg_id": msg_id,
-                        "hash": hash,
-                        "size": size,
-                        "name": display_name,
-                        "original_name": title
-                    }
-                    await db.insert_manual_file(manual_data)
-
-                if is_auth:
-                    # Proceed with automatic fetch
-                    metadata_info = await metadata(clean_filename(title), message)
-                    if metadata_info is not None:
-                        # Add file data to the queue for processing
-                        # Use the same cleaned display_name for consistency
-                        await file_queue.put((metadata_info, hash, int(channel), msg_id, size, display_name))
-
+        # Build set of valid channel IDs (handling with and without -100 prefix)
+        auth_channels = set()
+        for c in Telegram.AUTH_CHANNEL:
+            c_str = str(c).strip()
+            auth_channels.add(c_str)
+            if c_str.startswith("-100"):
+                auth_channels.add(c_str.replace("-100", ""))
             else:
-                await message.reply_text("Not supported")
-        except FloodWait as e:
-            LOGGER.info(f"Sleeping for {str(e.value)}s")
-            await asleep(e.value)
-            await message.reply_text(text=f"Got Floodwait of {str(e.value)}s",
-                                disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN)
-    else:
-        await message.reply(text="Channel is not in AUTH_CHANNEL")
+                auth_channels.add(f"-100{c_str}")
+
+        manual_channels = set()
+        for c in Telegram.MANUAL_CHANNEL:
+            c_str = str(c).strip()
+            manual_channels.add(c_str)
+            if c_str.startswith("-100"):
+                manual_channels.add(c_str.replace("-100", ""))
+            else:
+                manual_channels.add(f"-100{c_str}")
+
+        is_auth = (chat_id_str in auth_channels) or (chat_id_str.replace("-100", "") in auth_channels)
+        is_manual = (chat_id_str in manual_channels) or (chat_id_str.replace("-100", "") in manual_channels)
+
+        if not (is_auth or is_manual):
+            # Silently ignore channels not in AUTH/MANUAL list
+            return
+
+        file = message.video or message.document
+        if not file:
+            return
+
+        caption = (message.caption or "").strip()
+        if Telegram.USE_CAPTION and caption:
+            title = caption.replace("\n", "\\n")
+        else:
+            title = getattr(file, "file_name", None) or f"{file.file_unique_id}.mkv"
+
+        msg_id = message.id
+        hash = file.file_unique_id[:6]
+        size = get_readable_file_size(file.file_size)
+        channel = int(chat_id_str.replace("-100", ""))
+
+        # Improve file display name filtering for manual database
+        display_name = remove_urls(title)
+        display_name = clean_filename(display_name)
+
+        if not display_name.lower().endswith(('.mkv', '.mp4', '.webm')):
+            display_name += '.mkv'
+
+        if is_manual:
+            manual_data = {
+                "chat_id": channel,
+                "msg_id": msg_id,
+                "hash": hash,
+                "size": size,
+                "name": display_name,
+                "original_name": title
+            }
+            try:
+                await db.insert_manual_file(manual_data)
+                LOGGER.info(f"Manual file indexed: {display_name} (msg_id: {msg_id})")
+            except Exception as e:
+                LOGGER.error(f"Error inserting manual file: {e}")
+
+        if is_auth:
+            try:
+                cleaned_name = clean_filename(title)
+                metadata_info = await metadata(cleaned_name, message)
+                if metadata_info is not None:
+                    await file_queue.put((metadata_info, hash, channel, msg_id, size, display_name))
+                    LOGGER.info(f"Queued file for automatic indexing: {display_name} (msg_id: {msg_id})")
+                else:
+                    LOGGER.warning(f"Could not extract metadata for file: {title}")
+            except Exception as meta_err:
+                LOGGER.error(f"Error fetching metadata for {title}: {meta_err}", exc_info=True)
+
+    except FloodWait as e:
+        LOGGER.warning(f"FloodWait in file_receive_handler: sleeping for {e.value}s")
+        await asleep(e.value)
+    except Exception as e:
+        LOGGER.error(f"Error in file_receive_handler: {e}", exc_info=True)
+
 
 
 @StreamBot.on_message(filters.command('caption') & filters.private & CustomFilters.admin)

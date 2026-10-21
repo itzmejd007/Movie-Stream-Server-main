@@ -18,6 +18,25 @@ async def metadata(filename, message):
     title = data.get('title')
     season = data.get('season')
     episode = data.get('episode')
+
+    # Normalize episode and season for anime (where season is often omitted)
+    if episode is not None:
+        if isinstance(episode, list):
+            episode = episode[0]
+        try:
+            episode = int(episode)
+        except (ValueError, TypeError):
+            episode = 1
+        if season is None:
+            season = 1
+        else:
+            if isinstance(season, list):
+                season = season[0]
+            try:
+                season = int(season)
+            except (ValueError, TypeError):
+                season = 1
+
     year = data.get('year')
     quality = data.get('resolution')
     if quality is None:
@@ -46,8 +65,16 @@ async def metadata(filename, message):
                 if default_id is None:
                     if Telegram.USE_TMDB:
                         tv_shows = await tmdb.search().tv(query=title)
+                        if not tv_shows:
+                            import re
+                            clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', title).strip()
+                            tv_shows = await tmdb.search().tv(query=clean_q)
+                        if not tv_shows:
+                            print(f"TV show not found on TMDB: {title}")
+                            return None
                         tv_show = tv_shows[0].id  # Get first result
                         tv_show_details = await tmdb.tv(tv_show).details()
+
                     
                     # Try fetching episode details, fallback to default
                         try:

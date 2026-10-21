@@ -499,9 +499,17 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, secure_has
         LOGGER.debug(f"Creating new ByteStreamer object for client {index}")
         tg_connect = ByteStreamer(faster_client)
         class_cache[faster_client] = tg_connect
-    LOGGER.debug("before calling get_file_properties")
-    file_id = await tg_connect.get_file_properties(chat_id=chat_id, message_id=msg_id)
-    LOGGER.debug("after calling get_file_properties")
+    try:
+        file_id = await tg_connect.get_file_properties(chat_id=chat_id, message_id=msg_id)
+    except Exception as e:
+        LOGGER.warning(f"Error getting file properties for msg {msg_id}: {e}. Retrying with fresh fetch...")
+        try:
+            tg_connect._ByteStreamer__cached_file_ids.pop(msg_id, None)
+            file_id = await tg_connect.get_file_properties(chat_id=chat_id, message_id=msg_id)
+        except Exception as retry_err:
+            LOGGER.error(f"Failed to get file properties on retry for msg {msg_id}: {retry_err}")
+            raise HTTPException(status_code=404, detail="Media file not found or expired on Telegram storage")
+
     if file_id.unique_id[:6] != secure_hash:
         LOGGER.debug(f"Invalid hash for message with ID {msg_id}")
         raise InvalidHash

@@ -603,17 +603,24 @@ class Database:
                     for d in tv_docs:
                         d_title = d.get("title", "")
                         d_slug = re.sub(r'[^a-z0-9]+', '-', d_title.lower()).strip('-')
+                        score = 0
                         if target_slug == d_slug:
-                            best_doc = d
-                            break
-                        # Word overlap score (e.g. "anime", "times", "dub" vs "crunchyroll", "dub")
+                            score += 100
                         d_words = set(d_slug.split('-'))
-                        overlap = len(target_words.intersection(d_words))
-                        if overlap > best_match_score:
-                            best_match_score = overlap
+                        score += len(target_words.intersection(d_words)) * 10
+                        if season_number is not None and any(str(s.get("season_number")) == str(season_number) for s in d.get("seasons", [])):
+                            score += 50
+                        if score > best_match_score:
+                            best_match_score = score
                             best_doc = d
 
                     doc = best_doc or tv_docs[0]
+                elif season_number is not None:
+                    doc_with_season = next(
+                        (d for d in tv_docs if any(str(s.get("season_number")) == str(season_number) for s in d.get("seasons", []))),
+                        None
+                    )
+                    doc = doc_with_season or tv_docs[0]
                 else:
                     doc = tv_docs[0]
 
@@ -662,14 +669,19 @@ class Database:
         # 4. Handle sub-resources (season / episode) if requested
         if episode_number is not None and season_number is not None:
             for season in doc.get("seasons", []):
-                if season.get("season_number") == season_number:
+                if str(season.get("season_number")) == str(season_number):
                     eps = season.get("episodes", [])
                     # 1. Direct match by episode_number (e.g. 25 or 1)
-                    matched_ep = next((e for e in eps if e.get("episode_number") == episode_number), None)
+                    matched_ep = next((e for e in eps if str(e.get("episode_number")) == str(episode_number)), None)
                     # 2. Relative index match (e.g. requesting episode 1 of Season 2 when episodes are [25, 26, ...])
-                    if not matched_ep and eps and 1 <= episode_number <= len(eps):
-                        sorted_eps = sorted(eps, key=lambda x: x.get("episode_number", 0))
-                        matched_ep = sorted_eps[episode_number - 1]
+                    if not matched_ep and eps:
+                        try:
+                            ep_int = int(episode_number)
+                            if 1 <= ep_int <= len(eps):
+                                sorted_eps = sorted(eps, key=lambda x: int(x.get("episode_number", 0)) if str(x.get("episode_number", "")).isdigit() else 0)
+                                matched_ep = sorted_eps[ep_int - 1]
+                        except (ValueError, TypeError):
+                            pass
 
                     if matched_ep:
                         details = self._convert_object_id(matched_ep)
@@ -688,7 +700,7 @@ class Database:
 
         elif season_number is not None:
             for season in doc.get("seasons", []):
-                if season.get("season_number") == season_number:
+                if str(season.get("season_number")) == str(season_number):
                     details = self._convert_object_id(season)
                     details.update({
                         "tmdb_id": doc.get("tmdb_id", tmdb_id),
@@ -708,49 +720,73 @@ class Database:
 
     async def get_quality_details(
         self,
-        tmdb_id: int,
+        tmdb_id: Union[int, str],
         quality: str,
         season: Optional[int] = None,
         episode: Optional[int] = None
-    ) -> List[Dict[str, int]]:
+    ) -> List[Dict[str, Any]]:
+        possible_ids = [tmdb_id]
+        try:
+            possible_ids.append(int(tmdb_id))
+        except (ValueError, TypeError):
+            pass
+        possible_ids.append(str(tmdb_id))
+        possible_ids = list(set(possible_ids))
+
+        id_queries = [{"tmdb_id": {"$in": possible_ids}}]
+        if isinstance(tmdb_id, str) and ObjectId.is_valid(tmdb_id):
+            id_queries.append({"_id": ObjectId(tmdb_id)})
+
+        query = {"$or": id_queries} if len(id_queries) > 1 else id_queries[0]
+        req_q = str(quality).strip().lower()
+
         if season is None:
             # Movie case
-            doc = await self.movie_collection.find_one(
-                {"tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]}},
-                {"telegram": 1}
-            )
-            if not doc:
-                return []
-            return [
-                {"id": item["id"], "name": item["name"]}
-                for item in doc.get("telegram", [])
-                if item["quality"] == quality
-            ]
+            cursor = self.movie_collection.find(query)
+            docs = await cursor.to_list(10)
+            results = []
+            for doc in docs:
+                for item in doc.get("telegram", []):
+                    item_q = str(item.get("quality", "")).strip().lower()
+                    if req_q == "all" or item_q == req_q or req_q in item_q:
+                        results.append({"id": item["id"], "name": item["name"], "quality": item.get("quality")})
+            return results
         else:
             # TV show case
-            doc = await self.tv_collection.find_one(
-                {"tmdb_id": {"$in": [tmdb_id, str(tmdb_id)]}},
-                {"seasons": 1}
-            )
-            if not doc:
+            cursor = self.tv_collection.find(query)
+            docs = await cursor.to_list(10)
+            if not docs:
                 return []
             
             results = []
-            for s in doc.get("seasons", []):
-                if s["season_number"] == season:
-                    episodes = s.get("episodes", [])
-                    
-                    # Filter by specific episode if provided
-                    if episode is not None:
-                        episodes = [ep for ep in episodes if ep["episode_number"] == episode]
-                    
-                    for ep in episodes:
-                        results.extend([
-                            {"id": t["id"], "name": t["name"]}
-                            for t in ep.get("telegram", [])
-                            if t["quality"] == quality
-                        ])
+            for doc in docs:
+                for s in doc.get("seasons", []):
+                    if str(s.get("season_number")) == str(season):
+                        episodes = s.get("episodes", [])
+                        
+                        # Filter by specific episode if provided
+                        if episode is not None:
+                            matched_eps = [
+                                ep for ep in episodes 
+                                if str(ep.get("episode_number")) == str(episode)
+                            ]
+                            if not matched_eps and episodes:
+                                try:
+                                    ep_int = int(episode)
+                                    if 1 <= ep_int <= len(episodes):
+                                        sorted_eps = sorted(episodes, key=lambda x: int(x.get("episode_number", 0)) if str(x.get("episode_number", "")).isdigit() else 0)
+                                        matched_eps = [sorted_eps[ep_int - 1]]
+                                except (ValueError, TypeError):
+                                    pass
+                            episodes = matched_eps
+                        
+                        for ep in episodes:
+                            for t in ep.get("telegram", []):
+                                item_q = str(t.get("quality", "")).strip().lower()
+                                if req_q == "all" or item_q == req_q or req_q in item_q:
+                                    results.append({"id": t["id"], "name": t["name"], "quality": t.get("quality")})
             return results
+
 
 
     async def delete_document(

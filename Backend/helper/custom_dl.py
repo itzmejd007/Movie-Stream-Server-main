@@ -17,7 +17,7 @@ from Backend.pyrofork import work_loads
 
 class ByteStreamer:
     def __init__(self, client: Client):
-        self.clean_timer = 30 * 60
+        self.clean_timer = 15 * 60
         self.client: Client = client
         self.__cached_file_ids: Dict[int, FileId] = {}
         asyncio.create_task(self.clean_cache())
@@ -92,20 +92,20 @@ class ByteStreamer:
                 if stop_event.is_set():
                     return None
                 try:
-                    if not getattr(media_session, "is_connected", True):
-                        async with session_lock:
+                    async with session_lock:
+                        if not getattr(media_session, "is_connected", True):
                             media_session = await self.get_or_create_media_session(client, curr_file_id)
 
-                    r = await asyncio.wait_for(
-                        media_session.send(
-                            raw.functions.upload.GetFile(
-                                location=location,
-                                offset=p_offset,
-                                limit=chunk_size
-                            )
-                        ),
-                        timeout=25.0
-                    )
+                        r = await asyncio.wait_for(
+                            media_session.send(
+                                raw.functions.upload.GetFile(
+                                    location=location,
+                                    offset=p_offset,
+                                    limit=chunk_size
+                                )
+                            ),
+                            timeout=25.0
+                        )
 
                     if isinstance(r, raw.types.upload.File):
                         return r.bytes
@@ -123,19 +123,34 @@ class ByteStreamer:
                     if chat_id and message_id:
                         try:
                             async with session_lock:
+                                self.__cached_file_ids.pop(message_id, None)
                                 curr_file_id = await get_file_ids(client, int(chat_id), int(message_id))
                                 location = await self.get_location(curr_file_id)
                                 self.__cached_file_ids[message_id] = curr_file_id
                         except Exception as ref_err:
                             LOGGER.error(f"Failed to refresh file_id: {ref_err}")
                     await asyncio.sleep(1)
-                except (asyncio.TimeoutError, TimeoutError):
-                    LOGGER.warning(f"Timeout fetching part {p_num}/{part_count} (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(0.3 * (attempt + 1))
+                except (asyncio.TimeoutError, TimeoutError) as e:
+                    LOGGER.warning(f"Timeout fetching part {p_num}/{part_count} (attempt {attempt + 1}/{max_retries}). Reconnecting...")
+                    try:
+                        async with session_lock:
+                            try:
+                                await media_session.stop()
+                            except Exception:
+                                pass
+                            client.media_sessions.pop(curr_file_id.dc_id, None)
+                            media_session = await self.generate_media_session(client, curr_file_id)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5 * (attempt + 1))
                 except (OSError, ConnectionError, AttributeError) as e:
                     LOGGER.warning(f"Connection issue at part {p_num}/{part_count}: {e}. Reconnecting session...")
                     try:
                         async with session_lock:
+                            try:
+                                await media_session.stop()
+                            except Exception:
+                                pass
                             client.media_sessions.pop(curr_file_id.dc_id, None)
                             media_session = await self.generate_media_session(client, curr_file_id)
                     except Exception:
@@ -252,6 +267,14 @@ class ByteStreamer:
 
     async def generate_media_session(self, client: Client, file_id: FileId) -> Session:
         media_session = client.media_sessions.get(file_id.dc_id, None)
+        if media_session is not None and not getattr(media_session, "is_connected", False):
+            try:
+                await media_session.stop()
+            except Exception:
+                pass
+            client.media_sessions.pop(file_id.dc_id, None)
+            media_session = None
+
         if media_session is None:
             if file_id.dc_id != await client.storage.dc_id():
                 media_session = Session(
