@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
-# Execute optional upstream update safely, then run the Backend server
-python3 update.py || true
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$DIR"
+
+# Activate venv if exists
+if [ -d "venv" ]; then
+    source venv/bin/activate
+elif [ -d "../venv" ]; then
+    source ../venv/bin/activate
+fi
+
 exec python3 -m Backend
+
