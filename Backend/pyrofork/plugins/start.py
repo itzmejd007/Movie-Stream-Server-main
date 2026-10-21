@@ -7,7 +7,7 @@ from Backend.config import Telegram
 from Backend.helper.custom_filter import CustomFilters
 from Backend.helper.encrypt import decode_string
 from Backend.helper.metadata import metadata
-from Backend.helper.pyro import clean_filename, get_readable_file_size, remove_urls
+from Backend.helper.pyro import clean_filename, get_readable_file_size, remove_urls, get_channel_id_pair
 from Backend.pyrofork import StreamBot
 from pyrogram import filters, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
@@ -544,45 +544,39 @@ for i in range(2):
     & (
         filters.document
         | filters.video
+        | filters.audio
     )
 )
 async def file_receive_handler(bot: Client, message: Message):
     try:
-        chat_id_str = str(message.chat.id)
+        msg_full, msg_digits = get_channel_id_pair(message.chat.id)
         chat_title = getattr(message.chat, "title", None) or getattr(message.chat, "type", "Unknown")
 
-        # Build set of valid channel IDs (handling with and without -100 prefix)
         auth_channels = set()
         for c in Telegram.AUTH_CHANNEL:
-            c_str = str(c).strip()
-            auth_channels.add(c_str)
-            if c_str.startswith("-100"):
-                auth_channels.add(c_str.replace("-100", ""))
-            else:
-                auth_channels.add(f"-100{c_str}")
+            f, d = get_channel_id_pair(c)
+            auth_channels.add(f)
+            auth_channels.add(d)
 
         manual_channels = set()
         for c in Telegram.MANUAL_CHANNEL:
-            c_str = str(c).strip()
-            manual_channels.add(c_str)
-            if c_str.startswith("-100"):
-                manual_channels.add(c_str.replace("-100", ""))
-            else:
-                manual_channels.add(f"-100{c_str}")
+            f, d = get_channel_id_pair(c)
+            manual_channels.add(f)
+            manual_channels.add(d)
 
-        is_auth = (chat_id_str in auth_channels) or (chat_id_str.replace("-100", "") in auth_channels)
-        is_manual = (chat_id_str in manual_channels) or (chat_id_str.replace("-100", "") in manual_channels)
+        is_auth = (msg_full in auth_channels) or (msg_digits in auth_channels)
+        is_manual = (msg_full in manual_channels) or (msg_digits in manual_channels)
 
-        file = message.video or message.document
+        file = message.video or message.document or message.audio
         if not file:
             return
 
         file_display = getattr(file, "file_name", None) or f"id_{message.id}"
-        LOGGER.info(f"Incoming media message #{message.id} from chat {chat_title} (ID: {chat_id_str}), file: '{file_display}'")
+        LOGGER.info(f"Incoming media message #{message.id} from chat '{chat_title}' (ID: {message.chat.id}), file: '{file_display}'")
 
         if not (is_auth or is_manual):
             LOGGER.warning(
-                f"Ignored post from unauthorized chat_id={chat_id_str} ({chat_title}). "
+                f"Ignored post from unauthorized chat_id={message.chat.id} ('{chat_title}'). "
                 f"Configured AUTH_CHANNEL={Telegram.AUTH_CHANNEL}, MANUAL_CHANNEL={Telegram.MANUAL_CHANNEL}"
             )
             return
@@ -597,7 +591,7 @@ async def file_receive_handler(bot: Client, message: Message):
         msg_id = message.id
         hash = file.file_unique_id[:6]
         size = get_readable_file_size(file.file_size)
-        channel = int(chat_id_str.replace("-100", ""))
+        channel = int(msg_digits)
 
         # Improve file display name filtering for manual database
         display_name = remove_urls(title)
