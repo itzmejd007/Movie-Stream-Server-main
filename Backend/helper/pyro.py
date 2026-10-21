@@ -1,6 +1,6 @@
 import pycountry
 from pyrogram.file_id import FileId
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Tuple
 from Backend.logger import LOGGER
 from Backend import __version__, now, timezone
 from Backend.config import Telegram
@@ -43,6 +43,15 @@ def get_readable_file_size(size_in_bytes):
         size_in_bytes /= 1024
         index += 1
     return f'{size_in_bytes:.2f}{SIZE_UNITS[index]}' if index > 0 else f'{size_in_bytes:.2f}B'
+
+
+def get_channel_id_pair(raw_id: Union[int, str]) -> Tuple[str, str]:
+    """Return both ('-100...', '...') string forms of a Telegram channel/chat ID stripped of quotes."""
+    cleaned = str(raw_id).strip().strip("'\"")
+    digits = re.sub(r'^-?100', '', cleaned).lstrip('-')
+    if not digits:
+        return cleaned, cleaned
+    return f"-100{digits}", digits
 
 
 def clean_filename(filename):
