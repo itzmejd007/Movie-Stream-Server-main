@@ -1,4 +1,6 @@
 import os
+import re
+import asyncio
 from asyncio import create_task, sleep as asleep
 from urllib.parse import urlparse
 from Backend.logger import LOGGER
@@ -659,6 +661,154 @@ async def file_receive_handler(bot: Client, message: Message):
         LOGGER.error(f"Error in file_receive_handler: {e}", exc_info=True)
 
 
+
+@StreamBot.on_message(filters.command(["check", "status"]) & filters.private & CustomFilters.admin)
+async def check_bot_status(bot: Client, message: Message):
+    status_msg = await message.reply_text("⏳ Checking bot and channels status...")
+    report = ["🔍 **System Diagnostic Report**\n"]
+    
+    # 1. AUTH CHANNELS
+    report.append("📡 **Automatic Channel (AUTH_CHANNEL):**")
+    if not Telegram.AUTH_CHANNEL:
+        report.append("  ⚠️ None configured!")
+    for raw in Telegram.AUTH_CHANNEL:
+        full, dig = get_channel_id_pair(raw)
+        try:
+            chat = await bot.get_chat(int(full))
+            member = await bot.get_chat_member(int(full), "me")
+            is_adm = member.status in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER)
+            report.append(f"  • `{chat.title}` (ID: `{full}`)\n    Admin: {'✅ YES' if is_adm else '❌ NO (Make bot Admin!)'}")
+        except Exception as e:
+            report.append(f"  • ID: `{full}` ❌ Error: `{e}`")
+    
+    # 2. MANUAL CHANNELS
+    report.append("\n📁 **Manual Channel (MANUAL_CHANNEL):**")
+    if not Telegram.MANUAL_CHANNEL:
+        report.append("  ⚠️ None configured!")
+    for raw in Telegram.MANUAL_CHANNEL:
+        full, dig = get_channel_id_pair(raw)
+        try:
+            chat = await bot.get_chat(int(full))
+            member = await bot.get_chat_member(int(full), "me")
+            is_adm = member.status in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER)
+            report.append(f"  • `{chat.title}` (ID: `{full}`)\n    Admin: {'✅ YES' if is_adm else '❌ NO (Make bot Admin!)'}")
+        except Exception as e:
+            report.append(f"  • ID: `{full}` ❌ Error: `{e}`")
+
+    # 3. SETTINGS
+    report.append(f"\n⚙️ **Bot Config:**")
+    report.append(f"  • USE_CAPTION: `{Telegram.USE_CAPTION}`")
+    report.append(f"  • USE_TMDB: `{Telegram.USE_TMDB}`")
+    
+    # 4. STATS
+    try:
+        analytics = await db.get_analytics()
+        m_cnt = analytics.get('stats', {}).get('total_movies', 0)
+        t_cnt = analytics.get('stats', {}).get('total_tv', 0)
+        unlinked_cnt = analytics.get('stats', {}).get('total_unlinked', 0)
+        report.append(f"\n📊 **Database Stats:**")
+        report.append(f"  • Movies: `{m_cnt}` | TV Shows: `{t_cnt}`")
+        report.append(f"  • Unlinked (Orphan) Files: `{unlinked_cnt}`")
+    except Exception:
+        pass
+
+    await status_msg.edit_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
+
+@StreamBot.on_message(filters.command(["sync", "resync"]) & filters.private & CustomFilters.admin)
+async def manual_sync_command(bot: Client, message: Message):
+    sync_msg = await message.reply_text("⏳ Synchronizing recent files from channels (last 100 messages)...")
+    manual_synced = 0
+    auto_queued = 0
+    
+    # 1. Sync MANUAL_CHANNEL -> manual_files
+    for c in Telegram.MANUAL_CHANNEL:
+        full, dig = get_channel_id_pair(c)
+        try:
+            ch_id = int(full)
+            async for msg in bot.get_chat_history(ch_id, limit=100):
+                file = msg.video or msg.document or msg.audio
+                if not file:
+                    continue
+                caption = (msg.caption or "").strip()
+                if Telegram.USE_CAPTION and caption:
+                    title = re.sub(r'[\r\n]+', ' ', caption).strip()
+                else:
+                    title = getattr(file, "file_name", None) or f"{file.file_unique_id}.mkv"
+                
+                display_name = clean_filename(remove_urls(title))
+                if not display_name.lower().endswith(('.mkv', '.mp4', '.webm')):
+                    display_name += '.mkv'
+                
+                manual_data = {
+                    "chat_id": int(dig),
+                    "msg_id": msg.id,
+                    "hash": file.file_unique_id[:6],
+                    "size": get_readable_file_size(file.file_size),
+                    "name": display_name,
+                    "original_name": title
+                }
+                if await db.insert_manual_file(manual_data):
+                    manual_synced += 1
+        except Exception as e:
+            LOGGER.error(f"Error syncing manual channel {full}: {e}")
+            
+    # 2. Sync AUTH_CHANNEL -> auto metadata / auto queue (or fallback to manual if metadata fails)
+    for c in Telegram.AUTH_CHANNEL:
+        full, dig = get_channel_id_pair(c)
+        try:
+            ch_id = int(full)
+            async for msg in bot.get_chat_history(ch_id, limit=100):
+                file = msg.video or msg.document or msg.audio
+                if not file:
+                    continue
+                caption = (msg.caption or "").strip()
+                if Telegram.USE_CAPTION and caption:
+                    title = re.sub(r'[\r\n]+', ' ', caption).strip()
+                else:
+                    title = getattr(file, "file_name", None) or f"{file.file_unique_id}.mkv"
+                
+                display_name = clean_filename(remove_urls(title))
+                if not display_name.lower().endswith(('.mkv', '.mp4', '.webm')):
+                    display_name += '.mkv'
+                
+                cleaned_name = clean_filename(title)
+                metadata_info = await metadata(cleaned_name, msg)
+                if metadata_info is None and Telegram.USE_CAPTION and getattr(file, "file_name", None):
+                    fallback = clean_filename(file.file_name)
+                    if fallback != cleaned_name:
+                        metadata_info = await metadata(fallback, msg)
+                        if metadata_info:
+                            display_name = fallback
+                
+                f_hash = file.file_unique_id[:6]
+                f_size = get_readable_file_size(file.file_size)
+                ch_num = int(dig)
+                
+                if metadata_info is not None:
+                    await file_queue.put((metadata_info, f_hash, ch_num, msg.id, f_size, display_name))
+                    auto_queued += 1
+                else:
+                    # Auto-save to manual database so it is not lost
+                    m_data = {
+                        "chat_id": ch_num,
+                        "msg_id": msg.id,
+                        "hash": f_hash,
+                        "size": f_size,
+                        "name": display_name,
+                        "original_name": title
+                    }
+                    if await db.insert_manual_file(m_data):
+                        manual_synced += 1
+        except Exception as e:
+            LOGGER.error(f"Error syncing auth channel {full}: {e}")
+            
+    await sync_msg.edit_text(
+        f"✅ **Sync Completed!**\n\n"
+        f"📁 **Manual Channel Synced:** `{manual_synced}` new file(s) added to Orphan Files Hub\n"
+        f"📡 **Automatic Channel Synced:** `{auto_queued}` file(s) queued for website indexing\n\n"
+        f"🌐 You can now view Orphan Files Hub in the Admin Panel (`/admin`) or check the website!",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 @StreamBot.on_message(filters.command('caption') & filters.private & CustomFilters.admin)
 async def toggle_caption(bot: Client, message: Message):
