@@ -10,7 +10,7 @@ from passlib.context import CryptContext
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, Response
 import urllib.parse
 from urllib.parse import quote
 from fastapi.templating import Jinja2Templates
@@ -50,6 +50,71 @@ app.add_middleware(
 )
 
 
+@app.get("/sitemap.xml", response_class=Response)
+@app.get("/api/sitemap.xml", response_class=Response)
+async def dynamic_sitemap_endpoint():
+    """
+    Generate dynamic XML sitemap of all movies and series for Google SEO indexing.
+    """
+    raw_domain = getattr(Telegram, "FRONTEND_LINK", "animetoon.in") or "animetoon.in"
+    domain = raw_domain.strip().rstrip('/')
+    base_url = domain if domain.startswith("http") else f"https://{domain}"
+
+    xml_lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    ]
+
+    # Core high-priority landing routes
+    static_routes = [
+        ("/", "1.0", "daily"),
+        ("/movies", "0.9", "daily"),
+        ("/series", "0.9", "daily"),
+        ("/collections", "0.8", "weekly"),
+    ]
+    now_iso = datetime.utcnow().strftime("%Y-%m-%d")
+
+    for path_str, priority, changefreq in static_routes:
+        xml_lines.append(f'  <url><loc>{base_url}{path_str}</loc><changefreq>{changefreq}</changefreq><priority>{priority}</priority></url>')
+
+    # Dynamic Movies
+    try:
+        if db.movie_collection is not None:
+            movies_cursor = db.movie_collection.find({}, {"tmdb_id": 1, "title": 1, "updated_on": 1})
+            async for m in movies_cursor:
+                tmdb_id = m.get("tmdb_id")
+                if not tmdb_id:
+                    continue
+                title = m.get("title", "")
+                slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+                lastmod = m.get("updated_on")
+                lastmod_str = lastmod.strftime("%Y-%m-%d") if isinstance(lastmod, datetime) else now_iso
+                url_path = f"/mov/{tmdb_id}/{slug}" if slug else f"/mov/{tmdb_id}"
+                xml_lines.append(f'  <url><loc>{base_url}{url_path}</loc><lastmod>{lastmod_str}</lastmod><changefreq>weekly</changefreq><priority>0.8</priority></url>')
+    except Exception as e:
+        LOGGER.error(f"Error generating movie sitemap: {e}")
+
+    # Dynamic TV Shows / Anime Series
+    try:
+        if db.tv_collection is not None:
+            tv_cursor = db.tv_collection.find({}, {"tmdb_id": 1, "title": 1, "updated_on": 1})
+            async for t in tv_cursor:
+                tmdb_id = t.get("tmdb_id")
+                if not tmdb_id:
+                    continue
+                title = t.get("title", "")
+                slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+                lastmod = t.get("updated_on")
+                lastmod_str = lastmod.strftime("%Y-%m-%d") if isinstance(lastmod, datetime) else now_iso
+                url_path = f"/ser/{tmdb_id}/{slug}" if slug else f"/ser/{tmdb_id}"
+                xml_lines.append(f'  <url><loc>{base_url}{url_path}</loc><lastmod>{lastmod_str}</lastmod><changefreq>weekly</changefreq><priority>0.8</priority></url>')
+    except Exception as e:
+        LOGGER.error(f"Error generating tv sitemap: {e}")
+
+    xml_lines.append('</urlset>')
+    sitemap_xml = "\n".join(xml_lines)
+
+    return Response(content=sitemap_xml, media_type="application/xml")
 
 
 @app.get("/api/ping")
