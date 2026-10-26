@@ -336,6 +336,81 @@ async def sync_collections():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/collections", response_model=dict)
+async def create_new_collection(request: Request):
+    try:
+        body = await request.json()
+        doc = await db.create_collection(body)
+        if not doc:
+            raise HTTPException(status_code=400, detail="Failed to create collection")
+        return {"message": "Collection created successfully", "collection": doc}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/collections/{col_id}", response_model=dict)
+async def update_collection_by_id(col_id: str, request: Request):
+    try:
+        body = await request.json()
+        success = await db.update_collection(col_id, body)
+        if not success:
+            raise HTTPException(status_code=404, detail="Collection not found or update failed")
+        return {"message": "Collection updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/collections/{col_id}", response_model=dict)
+async def delete_collection_by_id(col_id: str):
+    try:
+        success = await db.delete_collection(col_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Collection not found or already deleted")
+        return {"message": "Collection deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/collections/{col_id}/items", response_model=dict)
+async def add_item_to_collection_endpoint(col_id: str, request: Request):
+    try:
+        body = await request.json()
+        success = await db.add_item_to_collection(col_id, body)
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to add item to collection")
+        return {"message": "Item added to collection successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/collections/{col_id}/bulk-items", response_model=dict)
+async def bulk_add_items_endpoint(col_id: str, request: Request):
+    try:
+        body = await request.json()
+        items_list = body if isinstance(body, list) else body.get("items", [])
+        success = await db.bulk_add_items_to_collection(col_id, items_list)
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to bulk add items")
+        return {"message": "Items added to collection successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/collections/{col_id}/items/{media_type}/{tmdb_id}", response_model=dict)
+async def remove_item_from_collection_endpoint(col_id: str, media_type: str, tmdb_id: Union[int, str]):
+    try:
+        success = await db.remove_item_from_collection(col_id, media_type, tmdb_id)
+        return {"message": "Item removed from collection successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/view/{media_type}/{tmdb_id}")
 async def increment_media_view(request: Request, media_type: str, tmdb_id: Union[int, str]):
