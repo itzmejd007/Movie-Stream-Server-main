@@ -304,6 +304,39 @@ async def get_trending_media(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.get("/api/collections", response_model=dict)
+async def get_collections(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1)
+):
+    try:
+        data = await db.get_or_auto_generate_collections(page, page_size)
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/collections/{col_id}", response_model=dict)
+async def get_collection_by_id(col_id: str):
+    try:
+        col = await db.get_collection_details(col_id)
+        if not col:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        return col
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/collections/sync", response_model=dict)
+async def sync_collections():
+    try:
+        await db.sync_auto_collections()
+        data = await db.get_or_auto_generate_collections(1, 100)
+        return {"message": "Collections synced successfully", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/view/{media_type}/{tmdb_id}")
 async def increment_media_view(request: Request, media_type: str, tmdb_id: Union[int, str]):
     try:

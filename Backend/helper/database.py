@@ -42,6 +42,7 @@ class Database:
         self.deploy_config = None
         self.view_analytics = None
         self.home_sections = None
+        self.collections = None
         self.connection_uri = connection_uri
         self.db_name = db_name
 
@@ -62,6 +63,7 @@ class Database:
             self.manual_collection = self.db["manual_files"]
             self.view_analytics = self.db["view_analytics"]
             self.home_sections = self.db["home_sections"]
+            self.collections = self.db["collections"]
 
             LOGGER.info("Database connection established")
         
@@ -1356,3 +1358,279 @@ class Database:
         except Exception as e:
             LOGGER.error(f"Error fetching items for section {section_id}: {e}")
             return []
+
+    async def get_or_auto_generate_collections(self, page: int = 1, page_size: int = 100, force_sync: bool = False):
+        """
+        Auto-generates anime franchise collections (Naruto, Ben 10, Shinchan, etc.)
+        from the tv and movie database, selects the highest-res backdrop thumbnail,
+        and saves them into self.collections in MongoDB.
+        """
+        try:
+            if self.collections is None:
+                return {"total": 0, "collections": []}
+
+            count = await self.collections.count_documents({})
+            if count == 0 or force_sync:
+                await self.sync_auto_collections()
+
+            skip = (page - 1) * page_size
+            cursor = self.collections.find({}).sort("title", 1).skip(skip).limit(page_size)
+            raw = await cursor.to_list(length=page_size)
+            total = await self.collections.count_documents({})
+            
+            res = [self._convert_object_id(c) for c in raw]
+            return {"total": total, "collections": res}
+        except Exception as e:
+            LOGGER.error(f"Error in get_or_auto_generate_collections: {e}")
+            return {"total": 0, "collections": []}
+
+    async def sync_auto_collections(self):
+        """
+        Scans all TV shows and Movies, clusters them into franchise collections,
+        extracts the best high-res 1920x1080 backdrop, and upserts into self.collections.
+        """
+        try:
+            FRANCHISES = [
+                {
+                    "key": "naruto",
+                    "title": "Naruto Universe",
+                    "slug": "naruto-universe",
+                    "description": "Complete Naruto series, Naruto Shippuden, Boruto, and all theatrical movies.",
+                    "patterns": ["naruto", "boruto"],
+                },
+                {
+                    "key": "ben10",
+                    "title": "Ben 10 Universe",
+                    "slug": "ben-10-collection",
+                    "description": "Classic Ben 10, Alien Force, Ultimate Alien, Omniverse, and movies.",
+                    "patterns": ["ben 10", "alien force", "ultimate alien", "omniverse"],
+                },
+                {
+                    "key": "shinchan",
+                    "title": "Crayon Shin-chan",
+                    "slug": "shinchan-collection",
+                    "description": "All seasons, episodes, and blockbuster animated movies of Shinchan.",
+                    "patterns": ["shinchan", "shin chan", "crayon shin"],
+                },
+                {
+                    "key": "dragonball",
+                    "title": "Dragon Ball Saga",
+                    "slug": "dragon-ball-universe",
+                    "description": "Dragon Ball, Dragon Ball Z, GT, Super, Daima, and cinematic films.",
+                    "patterns": ["dragon ball", "dragonball", "dbz", "super saiyan", "daima"],
+                },
+                {
+                    "key": "onepiece",
+                    "title": "One Piece Saga",
+                    "slug": "one-piece-universe",
+                    "description": "The epic voyage of Monkey D. Luffy across anime series and feature films.",
+                    "patterns": ["one piece"],
+                },
+                {
+                    "key": "demonslayer",
+                    "title": "Demon Slayer (Kimetsu no Yaiba)",
+                    "slug": "demon-slayer-collection",
+                    "description": "Complete Kimetsu no Yaiba anime series and theatrical films.",
+                    "patterns": ["demon slayer", "kimetsu no yaiba", "mugen train", "infinity castle"],
+                },
+                {
+                    "key": "jujutsukaisen",
+                    "title": "Jujutsu Kaisen Saga",
+                    "slug": "jujutsu-kaisen-collection",
+                    "description": "Jujutsu Kaisen TV seasons and Jujutsu Kaisen 0 movie.",
+                    "patterns": ["jujutsu kaisen", "sukuna"],
+                },
+                {
+                    "key": "bleach",
+                    "title": "Bleach Universe",
+                    "slug": "bleach-universe",
+                    "description": "Original Bleach anime series, Thousand-Year Blood War, and films.",
+                    "patterns": ["bleach", "thousand-year blood war"],
+                },
+                {
+                    "key": "aot",
+                    "title": "Attack on Titan Saga",
+                    "slug": "attack-on-titan-collection",
+                    "description": "The complete Shingeki no Kyojin epic spanning all seasons and specials.",
+                    "patterns": ["attack on titan", "shingeki no kyojin"],
+                },
+                {
+                    "key": "pokemon",
+                    "title": "Pokémon Universe",
+                    "slug": "pokemon-universe",
+                    "description": "Classic Pokémon journeys, new generations, and blockbuster animated movies.",
+                    "patterns": ["pokemon", "pokémon", "pikachu"],
+                },
+                {
+                    "key": "mha",
+                    "title": "My Hero Academia",
+                    "slug": "my-hero-academia-collection",
+                    "description": "All superhero anime seasons, OVAs, and theatrical motion pictures.",
+                    "patterns": ["my hero academia", "boku no hero"],
+                },
+                {
+                    "key": "hxh",
+                    "title": "Hunter x Hunter",
+                    "slug": "hunter-x-hunter-collection",
+                    "description": "Complete Hunter x Hunter adventures and movies.",
+                    "patterns": ["hunter x hunter", "hunterxhunter"],
+                },
+                {
+                    "key": "deathnote",
+                    "title": "Death Note Saga",
+                    "slug": "death-note-collection",
+                    "description": "The legendary psychological thriller anime series and movies.",
+                    "patterns": ["death note"],
+                },
+                {
+                    "key": "sololeveling",
+                    "title": "Solo Leveling Saga",
+                    "slug": "solo-leveling-collection",
+                    "description": "The global phenomenon anime series following Sung Jinwoo.",
+                    "patterns": ["solo leveling"],
+                },
+                {
+                    "key": "jojo",
+                    "title": "JoJo's Bizarre Adventure",
+                    "slug": "jojo-universe",
+                    "description": "The generational epic of the Joestar bloodline.",
+                    "patterns": ["jojo's bizarre adventure", "jojo"],
+                },
+                {
+                    "key": "conan",
+                    "title": "Detective Conan",
+                    "slug": "detective-conan-collection",
+                    "description": "The legendary mystery series and theatrical blockbuster movies.",
+                    "patterns": ["detective conan", "case closed"],
+                },
+                {
+                    "key": "sao",
+                    "title": "Sword Art Online Saga",
+                    "slug": "sword-art-online-collection",
+                    "description": "Aincrad, Gun Gale, Alicization, and Progressive feature films.",
+                    "patterns": ["sword art online", "alicization", "progressive"],
+                },
+                {
+                    "key": "blackclover",
+                    "title": "Black Clover Saga",
+                    "slug": "black-clover-collection",
+                    "description": "Black Clover TV series and Sword of the Wizard King movie.",
+                    "patterns": ["black clover"],
+                },
+            ]
+
+            tv_items = await self.tv_collection.find({}).to_list(None)
+            mov_items = await self.movie_collection.find({}).to_list(None)
+
+            all_media = []
+            for t in tv_items:
+                t["media_type"] = "tv"
+                all_media.append(t)
+            for m in mov_items:
+                m["media_type"] = "movie"
+                all_media.append(m)
+
+            for f in FRANCHISES:
+                matched_items = []
+                for item in all_media:
+                    title = (item.get("title") or "").lower()
+                    if any(p in title for p in f["patterns"]):
+                        matched_items.append(item)
+
+                if not matched_items:
+                    continue
+
+                # Find highest-rated backdrop / thumbnail
+                matched_items.sort(key=lambda x: float(x.get("rating") or 0), reverse=True)
+                best_thumb = None
+                for it in matched_items:
+                    bd = it.get("backdrop")
+                    if bd and isinstance(bd, str) and bd.startswith("http"):
+                        best_thumb = bd
+                        break
+                if not best_thumb:
+                    for it in matched_items:
+                        pos = it.get("poster")
+                        if pos and isinstance(pos, str) and pos.startswith("http"):
+                            best_thumb = pos
+                            break
+
+                items_refs = [
+                    {
+                        "id": str(it["_id"]),
+                        "media_type": it.get("media_type", "tv"),
+                        "title": it.get("title", ""),
+                        "tmdb_id": it.get("tmdb_id")
+                    }
+                    for it in matched_items
+                ]
+
+                col_doc = {
+                    "title": f["title"],
+                    "slug": f["slug"],
+                    "description": f["description"],
+                    "thumbnail": best_thumb or "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=1200",
+                    "items": items_refs,
+                    "itemsCount": len(items_refs),
+                    "isAuto": True,
+                    "updated_on": datetime.utcnow()
+                }
+
+                await self.collections.update_one(
+                    {"slug": f["slug"]},
+                    {"$set": col_doc},
+                    upsert=True
+                )
+            LOGGER.info("Auto collections synchronized successfully")
+        except Exception as e:
+            LOGGER.error(f"Error in sync_auto_collections: {e}")
+
+    async def get_collection_details(self, col_id_or_slug: str):
+        """
+        Fetches collection by _id or slug, and populates the actual movie/tv documents.
+        """
+        try:
+            if self.collections is None:
+                return None
+
+            col = None
+            if ObjectId.is_valid(col_id_or_slug):
+                col = await self.collections.find_one({"_id": ObjectId(col_id_or_slug)})
+            if not col:
+                col = await self.collections.find_one({"slug": col_id_or_slug})
+            if not col:
+                return None
+
+            col = self._convert_object_id(col)
+            items_refs = col.get("items", [])
+            populated_items = []
+
+            for ref in items_refs:
+                item_id = ref.get("id")
+                m_type = ref.get("media_type")
+                doc = None
+                if m_type == "movie" and self.movie_collection is not None:
+                    if ObjectId.is_valid(item_id):
+                        doc = await self.movie_collection.find_one({"_id": ObjectId(item_id)})
+                    if not doc and ref.get("tmdb_id"):
+                        doc = await self.movie_collection.find_one({"tmdb_id": ref.get("tmdb_id")})
+                    if doc:
+                        doc = self._convert_object_id(doc)
+                        doc["media_type"] = "movie"
+                elif self.tv_collection is not None:
+                    if ObjectId.is_valid(item_id):
+                        doc = await self.tv_collection.find_one({"_id": ObjectId(item_id)})
+                    if not doc and ref.get("tmdb_id"):
+                        doc = await self.tv_collection.find_one({"tmdb_id": ref.get("tmdb_id")})
+                    if doc:
+                        doc = self._convert_object_id(doc)
+                        doc["media_type"] = "tv"
+
+                if doc:
+                    populated_items.append(doc)
+
+            col["populated_items"] = populated_items
+            return col
+        except Exception as e:
+            LOGGER.error(f"Error getting collection details: {e}")
+            return None
