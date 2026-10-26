@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 from bson import ObjectId
@@ -1634,3 +1635,163 @@ class Database:
         except Exception as e:
             LOGGER.error(f"Error getting collection details: {e}")
             return None
+
+    async def create_collection(self, data: dict):
+        """
+        Creates a new curated collection.
+        """
+        try:
+            if self.collections is None:
+                return None
+            title = (data.get("title") or "").strip()
+            slug = data.get("slug") or re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+            doc = {
+                "title": title,
+                "slug": slug,
+                "description": data.get("description", ""),
+                "thumbnail": data.get("thumbnail") or "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=1200",
+                "items": data.get("items", []),
+                "itemsCount": len(data.get("items", [])),
+                "isAuto": False,
+                "created_on": datetime.utcnow(),
+                "updated_on": datetime.utcnow()
+            }
+            res = await self.collections.insert_one(doc)
+            doc["_id"] = str(res.inserted_id)
+            return doc
+        except Exception as e:
+            LOGGER.error(f"Error creating collection: {e}")
+            return None
+
+    async def update_collection(self, col_id: str, data: dict):
+        """
+        Updates an existing collection metadata or items.
+        """
+        try:
+            if self.collections is None:
+                return False
+            query = {"_id": ObjectId(col_id)} if ObjectId.is_valid(col_id) else {"slug": col_id}
+            data["updated_on"] = datetime.utcnow()
+            if "items" in data:
+                data["itemsCount"] = len(data["items"])
+            data.pop("_id", None)
+            res = await self.collections.update_one(query, {"$set": data})
+            return res.modified_count > 0 or res.matched_count > 0
+        except Exception as e:
+            LOGGER.error(f"Error updating collection {col_id}: {e}")
+            return False
+
+    async def delete_collection(self, col_id: str):
+        """
+        Deletes a collection by _id or slug.
+        """
+        try:
+            if self.collections is None:
+                return False
+            query = {}
+            if ObjectId.is_valid(col_id):
+                query = {"$or": [{"_id": ObjectId(col_id)}, {"slug": col_id}]}
+            else:
+                query = {"slug": col_id}
+            res = await self.collections.delete_one(query)
+            return res.deleted_count > 0
+        except Exception as e:
+            LOGGER.error(f"Error deleting collection {col_id}: {e}")
+            return False
+
+    async def add_item_to_collection(self, col_id: str, item_data: dict):
+        """
+        Adds a single item reference to a collection.
+        """
+        try:
+            if self.collections is None:
+                return False
+            query = {"_id": ObjectId(col_id)} if ObjectId.is_valid(col_id) else {"slug": col_id}
+            item_ref = {
+                "tmdb_id": item_data.get("tmdb_id"),
+                "media_type": item_data.get("media_type", "tv"),
+                "title": item_data.get("title", ""),
+                "id": str(item_data.get("id") or item_data.get("_id") or item_data.get("tmdb_id"))
+            }
+            res = await self.collections.update_one(
+                query,
+                {
+                    "$addToSet": {"items": item_ref},
+                    "$set": {"updated_on": datetime.utcnow()}
+                }
+            )
+            col = await self.collections.find_one(query)
+            if col:
+                await self.collections.update_one(query, {"$set": {"itemsCount": len(col.get("items", []))}})
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error adding item to collection {col_id}: {e}")
+            return False
+
+    async def bulk_add_items_to_collection(self, col_id: str, items_list: list):
+        """
+        Bulk adds item references to a collection.
+        """
+        try:
+            if self.collections is None:
+                return False
+            query = {"_id": ObjectId(col_id)} if ObjectId.is_valid(col_id) else {"slug": col_id}
+            formatted_refs = [
+                {
+                    "tmdb_id": it.get("tmdb_id"),
+                    "media_type": it.get("media_type", "tv"),
+                    "title": it.get("title", ""),
+                    "id": str(it.get("id") or it.get("_id") or it.get("tmdb_id"))
+                }
+                for it in items_list
+            ]
+            await self.collections.update_one(
+                query,
+                {
+                    "$addToSet": {"items": {"$each": formatted_refs}},
+                    "$set": {"updated_on": datetime.utcnow()}
+                }
+            )
+            col = await self.collections.find_one(query)
+            if col:
+                await self.collections.update_one(query, {"$set": {"itemsCount": len(col.get("items", []))}})
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error bulk adding items to collection {col_id}: {e}")
+            return False
+
+    async def remove_item_from_collection(self, col_id: str, media_type: str, tmdb_id: Union[int, str]):
+        """
+        Removes an item from a collection by media_type and tmdb_id.
+        """
+        try:
+            if self.collections is None:
+                return False
+            query = {"_id": ObjectId(col_id)} if ObjectId.is_valid(col_id) else {"slug": col_id}
+            try:
+                tmdb_int = int(tmdb_id)
+            except:
+                tmdb_int = None
+            
+            pull_cond = {
+                "media_type": media_type,
+                "$or": [
+                    {"tmdb_id": tmdb_id},
+                    {"tmdb_id": str(tmdb_id)},
+                    {"tmdb_id": tmdb_int}
+                ]
+            }
+            await self.collections.update_one(
+                query,
+                {
+                    "$pull": {"items": pull_cond},
+                    "$set": {"updated_on": datetime.utcnow()}
+                }
+            )
+            col = await self.collections.find_one(query)
+            if col:
+                await self.collections.update_one(query, {"$set": {"itemsCount": len(col.get("items", []))}})
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error removing item from collection {col_id}: {e}")
+            return False
