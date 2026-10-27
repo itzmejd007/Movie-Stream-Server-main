@@ -562,6 +562,14 @@ class Database:
         
         tv_results = await self.tv_collection.aggregate(tv_pipeline).to_list(None)
         movie_results = await self.movie_collection.aggregate(movie_pipeline).to_list(None)
+        
+        for doc in tv_results:
+            if not doc.get("media_type"):
+                doc["media_type"] = "tv"
+        for doc in movie_results:
+            if not doc.get("media_type"):
+                doc["media_type"] = "movie"
+
         combined = tv_results + movie_results
         
         return {
