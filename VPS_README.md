@@ -165,3 +165,39 @@ Your frontend now includes automatic backend health detection:
 - **Server Online:** The frontend functions normally without interruption.
 - **Server Offline / Maintenance:** If the VPS server is restarting, undergoing updates, or unreachable, the frontend automatically displays a clean **Under Maintenance** screen with an auto-reconnect timer and "Retry Now" button.
 - As soon as the VPS backend is back online, the frontend automatically reconnects seamlessly!
+
+---
+
+## 🔄 1-Click Domain Migration & Automatic SSL (DMCA / Copyright Protection)
+
+When buying a new domain (e.g. `animetoon.xyz`) and migrating from `animetoon.in`:
+
+### 1. On your VPS (1-Command Automatic Domain & SSL Change)
+```bash
+chmod +x change_domain.sh setup_ssl.sh
+sudo ./change_domain.sh animetoon.xyz api.animetoon.xyz
+```
+This automatically:
+- Updates `FRONTEND_LINK` in `config.env`.
+- Updates Caddy / Nginx reverse proxy with the new domain.
+- Obtains and installs free Let's Encrypt / ZeroSSL HTTPS certificate automatically.
+- Restarts the backend service seamlessly.
+
+### 2. On Cloudflare (Old Domain Redirection Rule)
+To redirect **all traffic from old domain (`animetoon.in`) to new domain (`animetoon.xyz`)** without breaking links:
+1. Open Cloudflare dashboard for `animetoon.in`.
+2. Go to: **Rules** → **Redirect Rules** → **Create Rule**.
+3. Name: `Redirect to New Domain`.
+4. Matching incoming requests: **All incoming requests**.
+5. Target URL:
+   - Type: **Dynamic**
+   - Expression: `concat("https://animetoon.xyz", http.request.uri.path)`
+   - Status code: `301 (Moved Permanently)`
+   - Check: **Preserve query string**.
+6. Click **Deploy**.
+
+### 3. On Vercel
+1. Project Settings → **Domains** → Add `animetoon.xyz` and `www.animetoon.xyz`.
+2. Environment Variables → Update `VITE_BASE_URL` to `https://api.animetoon.xyz`.
+3. Click **Redeploy**.
+
